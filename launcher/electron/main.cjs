@@ -16,6 +16,12 @@ const {
   shell,
   Tray,
 } = require("electron");
+const {
+  isCodexRunning,
+  partitionForAccount,
+  readSwitcherAccounts,
+  writeCodexAuth,
+} = require("./accounts.cjs");
 const { BrowserHost } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
@@ -29,6 +35,7 @@ const { ensurePackagedRuntime } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
+const { resolveUserDataDir } = require("./user-data-dir.cjs");
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -56,6 +63,7 @@ const BROWSER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "launcher-browse
 const BROWSER_HELPER_PATH = app.isPackaged
   ? path.join(process.resourcesPath, "runtime", "app", "browser-helper.cjs")
   : path.join(SOURCE_ROOT, ".launcher-runtime", "browser-helper.cjs");
+const PRODUCT_NAME = "Codex Master";
 const GITHUB_URL = "https://github.com/suzukitakumi-hub/codex-chatgpt-web-plus";
 const X_URL = "https://x.com/miu21590";
 const CONNECTORS_URL = "https://chatgpt.com/#settings/Plugins";
@@ -65,12 +73,18 @@ const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNEL
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
 
-app.setName("Codex ChatGPT Web Plus");
+app.setName(PRODUCT_NAME);
 if (process.platform === "win32") app.setAppUserModelId("com.suzukitakumi.codex-chatgpt-web-plus");
-const configuredUserData = process.env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR?.trim();
-const launcherUserData = configuredUserData
-  ? resolveUserPath(configuredUserData)
-  : path.join(app.getPath("appData"), "Codex ChatGPT Web Plus");
+// Resolves (and, on first run after the rebrand, migrates) the userData directory. This runs
+// before the logger exists, so the outcome is logged once `start()` creates one; see the
+// `launcher.user_data_dir_resolved` log line below.
+const userDataResolution = resolveUserDataDir({
+  appDataRoot: app.getPath("appData"),
+  envOverride: process.env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR,
+  existsSync: fs.existsSync,
+  renameSync: fs.renameSync,
+});
+const launcherUserData = userDataResolution.dir;
 fs.mkdirSync(launcherUserData, { recursive: true, mode: 0o700 });
 if (process.platform !== "win32") fs.chmodSync(launcherUserData, 0o700);
 app.setPath("userData", launcherUserData);
@@ -197,9 +211,9 @@ function trayImage() {
 function createTray(logger) {
   try {
     tray = new Tray(trayImage());
-    tray.setToolTip("Codex ChatGPT Web Plus");
+    tray.setToolTip(PRODUCT_NAME);
     tray.setContextMenu(Menu.buildFromTemplate([
-      { label: "Open Codex ChatGPT Web Plus", click: () => showMainWindow() },
+      { label: `Open ${PRODUCT_NAME}`, click: () => showMainWindow() },
       { type: "separator" },
       { label: "Quit", click: () => { void requestQuit(); } },
     ]));
@@ -265,7 +279,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
       : {}),
     minWidth: MIN_WINDOW_BOUNDS.width,
     minHeight: MIN_WINDOW_BOUNDS.height,
-    title: "Codex ChatGPT Web Plus",
+    title: PRODUCT_NAME,
     icon: APP_ICON_PATH,
     show: false,
     backgroundColor: isMac ? "#00000000" : "#181818",
@@ -490,7 +504,7 @@ function registerIpc({ logger, stateStore }) {
       buttons: chinese ? ["取消", "移除"] : japanese ? ["キャンセル", "削除"] : ["Cancel", "Remove"],
       defaultId: 0,
       cancelId: 0,
-      title: chinese ? "移除 Codex ChatGPT Web Plus" : japanese ? "Codex ChatGPT Web Plus を削除" : "Remove Codex ChatGPT Web Plus",
+      title: chinese ? `移除 ${PRODUCT_NAME}` : japanese ? `${PRODUCT_NAME} を削除` : `Remove ${PRODUCT_NAME}`,
       message: chinese
         ? "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？"
         : japanese
@@ -589,6 +603,45 @@ function registerIpc({ logger, stateStore }) {
     return stateStore.update({ [key]: value === true });
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
+  handle("launcher:list-accounts", () => ({
+    accounts: readSwitcherAccounts(),
+    activeAccountId: stateStore.read().activeAccountId,
+  }));
+  handle("launcher:switch-account", async (_event, accountId) => {
+    if (typeof accountId !== "string" || !accountId) throw new Error("Account id is required");
+    const probe = isCodexRunning();
+    if (probe.running) {
+      throw new Error(
+        `Quit Codex before switching accounts, then try again.${probe.reason ? ` (${probe.reason})` : ""}`,
+      );
+    }
+    const accounts = readSwitcherAccounts();
+    if (!accounts.some((account) => account.id === accountId)) {
+      throw new Error(`No Codex Switcher account matches id ${accountId}`);
+    }
+    writeCodexAuth(accountId);
+    const state = stateStore.update({ activeAccountId: accountId });
+    send("launcher:state-changed", state);
+    logger.info("launcher.account_switched", { accountId });
+    // The already-constructed BrowserHost only reads `partition` once, at construction, so it
+    // keeps serving the OLD account's ChatGPT Web session even though auth.json above now
+    // authenticates Codex as the NEW account. Leaving that mismatch in place would silently burn
+    // the old account's ChatGPT quota, so a relaunch onto the new per-account partition is
+    // mandatory, not advisory. Reuse the normal shutdown path so the Codex bridge route restore
+    // and ChatGPT session persistence still happen.
+    const result = await requestQuit({ relaunch: true });
+    if (!result.ok) {
+      // auth.json is already switched at this point; leaving that half-applied without a clear
+      // signal would let the user believe the switch is complete while ChatGPT Web still runs as
+      // the previous account. Say so plainly instead of leaving it implicit.
+      throw new Error(
+        `Codex is now configured for the "${accountId}" account, but ${PRODUCT_NAME} could not `
+        + `restart automatically to match (${result.message}). Quit and reopen ${PRODUCT_NAME} `
+        + "manually now, or ChatGPT Web will keep running as the previous account.",
+      );
+    }
+    return state;
+  });
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
   handle("launcher:open-logs", async () => {
     const error = await shell.openPath(path.dirname(logger.filePath));
@@ -618,7 +671,11 @@ function registerIpc({ logger, stateStore }) {
   });
 }
 
-async function requestQuit() {
+// `relaunch: true` schedules `app.relaunch()` immediately before `app.quit()`, once every check
+// above has already passed and quitting is certain to proceed. It must stay there: calling
+// `app.relaunch()` any earlier (e.g. before the activeOperation check) would leave a relaunch
+// scheduled for whatever quit happens next, even a normal one, if this call ends up throwing.
+async function requestQuit({ relaunch = false } = {}) {
   if (shutdownInProgress || exitCommitted) {
     return { ok: false, message: "Launcher shutdown is already in progress" };
   }
@@ -626,7 +683,7 @@ async function requestQuit() {
   try {
     const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
     if (activeOperation) {
-      throw new Error(`Wait for ${activeOperation} to finish before quitting Codex ChatGPT Web Plus`);
+      throw new Error(`Wait for ${activeOperation} to finish before quitting ${PRODUCT_NAME}`);
     }
     // This launcher is the only thing keeping Codex's model route pointed at a live server.
     // Once this process exits, nothing is left to serve that route, so restore Codex's previous
@@ -647,6 +704,7 @@ async function requestQuit() {
     browserHost?.destroy();
     await browserControl?.close();
     exitCommitted = true;
+    if (relaunch) app.relaunch();
     app.quit();
     return { ok: true };
   } catch (error) {
@@ -745,6 +803,19 @@ async function start() {
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
+  if (userDataResolution.outcome === "migration-failed") {
+    logger.warn("launcher.user_data_dir_resolved", {
+      dir: launcherUserData,
+      outcome: userDataResolution.outcome,
+      detail: userDataResolution.detail,
+    });
+  } else {
+    logger.info("launcher.user_data_dir_resolved", {
+      dir: launcherUserData,
+      outcome: userDataResolution.outcome,
+      detail: userDataResolution.detail,
+    });
+  }
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({
@@ -787,6 +858,7 @@ async function start() {
     helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
     logger,
     publishState: (state) => send("launcher:browser-state", state),
+    partition: partitionForAccount(stateStore.read().activeAccountId),
   });
   await browserHost.ready();
   const updaterRuntimeRoot = runtimeRootProvider();
@@ -947,7 +1019,7 @@ async function start() {
     if (runtime.status === "external" || runtime.status === "needs-setup") {
       const detail = runtime.detail || (
         runtime.status === "external"
-          ? "Another process owns the configured Codex ChatGPT Web Plus runtime"
+          ? `Another process owns the configured ${PRODUCT_NAME} runtime`
           : "The installed runtime configuration must be repaired from Setup"
       );
       publishOperation({
@@ -990,7 +1062,7 @@ void start().catch((error) => {
     fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
   } catch {}
   try {
-    dialog.showErrorBox("Codex ChatGPT Web Plus could not start", message);
+    dialog.showErrorBox(`${PRODUCT_NAME} could not start`, message);
   } catch {}
   app.exit(1);
 });

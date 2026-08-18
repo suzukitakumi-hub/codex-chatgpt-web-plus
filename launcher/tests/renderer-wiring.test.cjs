@@ -32,7 +32,7 @@ test("normal shutdown persists the ChatGPT session before closing browser views"
 });
 
 test("quitting the launcher restores the Codex route before the runtime that serves it stops", () => {
-  const requestQuitStart = electronMain.indexOf("async function requestQuit()");
+  const requestQuitStart = electronMain.indexOf("async function requestQuit(");
   const restoreCall = electronMain.indexOf("runtimeHost.restoreBridgeRoute(\"app-quit-fail-safe\")", requestQuitStart);
   const supervisorShutdown = electronMain.indexOf("await runtimeSupervisor?.shutdown()", requestQuitStart);
   assert.ok(requestQuitStart >= 0, "requestQuit must exist");
@@ -41,6 +41,28 @@ test("quitting the launcher restores the Codex route before the runtime that ser
     supervisorShutdown > restoreCall,
     "the route must be restored before the runtime serving it is shut down",
   );
+});
+
+test("switching accounts relaunches the app onto the new partition instead of leaving BrowserHost stale", () => {
+  const switchStart = electronMain.indexOf('handle("launcher:switch-account"');
+  const switchEnd = electronMain.indexOf('handle("launcher:logs"', switchStart);
+  const handler = electronMain.slice(switchStart, switchEnd);
+  assert.ok(switchStart >= 0 && switchEnd > switchStart, "switch-account handler must remain registered");
+  assert.match(handler, /writeCodexAuth\(accountId\)/);
+  const writeIndex = handler.indexOf("writeCodexAuth(accountId)");
+  const relaunchIndex = handler.indexOf("requestQuit({ relaunch: true })");
+  assert.ok(relaunchIndex > writeIndex, "the switch must relaunch after auth.json is rewritten");
+  assert.match(handler, /if \(!result\.ok\)/);
+  assert.match(handler, /could not/);
+});
+
+test("requestQuit only schedules a relaunch once quitting is certain to proceed", () => {
+  const requestQuitStart = electronMain.indexOf("async function requestQuit(");
+  const relaunchCall = electronMain.indexOf("app.relaunch()", requestQuitStart);
+  const quitCall = electronMain.indexOf("app.quit()", requestQuitStart);
+  const exitCommitted = electronMain.indexOf("exitCommitted = true", requestQuitStart);
+  assert.ok(relaunchCall > exitCommitted, "app.relaunch() must be scheduled only after quitting is committed");
+  assert.ok(quitCall > relaunchCall, "app.relaunch() must run before app.quit() actually exits");
 });
 
 test("an uncaught exception or rejection restores the Codex route before the process exits", () => {

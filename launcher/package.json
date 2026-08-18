@@ -1,6 +1,6 @@
 {
   "name": "codex-chatgpt-web-plus-launcher",
-  "version": "2.1.12",
+  "version": "2.2.0",
   "private": true,
   "description": "Desktop control center for Codex ChatGPT Web (hardened fork)",
   "author": "miuuyy",
@@ -37,7 +37,7 @@
   },
   "build": {
     "appId": "com.suzukitakumi.codex-chatgpt-web-plus",
-    "productName": "Codex ChatGPT Web Plus",
+    "productName": "Codex Master",
     "artifactName": "codex-web-gpt-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "directories": {

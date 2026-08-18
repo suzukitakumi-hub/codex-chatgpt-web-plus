@@ -28,8 +28,8 @@ function linuxDesktopEntry(app, executable = linuxExecutable(app)) {
   return `[Desktop Entry]
 Type=Application
 Version=1.0
-Name=Codex ChatGPT Web Plus
-Comment=Start the Codex ChatGPT Web Plus launcher in the background
+Name=Codex Master
+Comment=Start the Codex Master launcher in the background
 Exec=/usr/bin/env APPIMAGE_EXTRACT_AND_RUN=1 CODEX_WEB_GPT_APPIMAGE=${desktopExecArgument(executable)} ${desktopExecArgument(executable)} --hidden
 Terminal=false
 X-GNOME-Autostart-enabled=true

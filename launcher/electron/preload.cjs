@@ -35,6 +35,8 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setAutostart: (enabled) => ipcRenderer.invoke("launcher:autostart", enabled),
   setPreference: (key, value) => ipcRenderer.invoke("launcher:set-preference", key, value),
   setSidebarState: (state) => ipcRenderer.invoke("launcher:sidebar-state", state),
+  listAccounts: () => ipcRenderer.invoke("launcher:list-accounts"),
+  switchAccount: (accountId) => ipcRenderer.invoke("launcher:switch-account", accountId),
   logs: (limit) => ipcRenderer.invoke("launcher:logs", limit),
   openLogs: () => ipcRenderer.invoke("launcher:open-logs"),
   installUpdate: () => ipcRenderer.invoke("launcher:update-install"),

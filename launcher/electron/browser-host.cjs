@@ -3,6 +3,7 @@ const path = require("node:path");
 const { randomBytes } = require("node:crypto");
 const { WebContentsView, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { LEGACY_CHATGPT_PARTITION } = require("./accounts.cjs");
 const {
   runBrowserHelperOperation,
   verifyConnectorWithBrowserHelper,
@@ -29,7 +30,6 @@ const TURN_HEARTBEAT_TIMEOUT_MS = 60_000;
 const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
 const BROWSER_NAVIGATION_TIMEOUT_MS = 60_000;
 const CHATGPT_AUTH_SESSION_TIMEOUT_MS = 5_000;
-const CHATGPT_PARTITION = "persist:codex-web-gpt-chatgpt";
 const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
 const ZOOM_FACTORS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 const AUTH_PROVIDER_HOSTS = new Set([
@@ -158,6 +158,7 @@ class BrowserHost {
     helper,
     logger,
     publishState,
+    partition = LEGACY_CHATGPT_PARTITION,
   }) {
     if (typeof getConnectorName !== "function") {
       throw new Error("Browser host connector-name resolver is unavailable");
@@ -170,6 +171,7 @@ class BrowserHost {
     this.helper = helper;
     this.logger = logger;
     this.publishState = publishState;
+    this.partition = partition;
     this.runBrowserHelperOperation = runBrowserHelperOperation;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
     this.surfaceId = randomBytes(24).toString("base64url");
@@ -207,7 +209,7 @@ class BrowserHost {
     };
     this.view = new WebContentsView({
       webPreferences: {
-        partition: CHATGPT_PARTITION,
+        partition: this.partition,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -275,7 +277,7 @@ class BrowserHost {
     if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
     const view = new WebContentsView({
       webPreferences: {
-        partition: CHATGPT_PARTITION,
+        partition: this.partition,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -1412,7 +1414,7 @@ class BrowserHost {
       endpoint: `http://127.0.0.1:${this.cdpPort}`,
       control: this.control,
       helper: this.helper,
-      partition: "persist:codex-web-gpt-chatgpt",
+      partition: this.partition,
       idleUrl: IDLE_BROWSER_URL,
       surfaceId: this.surfaceId,
       createdAt: new Date().toISOString(),

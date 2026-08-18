@@ -22,6 +22,15 @@ export interface LauncherState {
   codexRestartRequired?: boolean;
   mcpGuideStep: number;
   sessionRefreshReminderAt: string | null;
+  activeAccountId: string | null;
+}
+
+export interface SwitcherAccountSummary {
+  id: string;
+  name: string;
+  email: string | null;
+  planType: string | null;
+  authMode: string | null;
 }
 
 export interface BrowserState {
@@ -136,6 +145,8 @@ export interface LauncherApi {
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
   setPreference(key: "keepRunningOnClose" | "showBrowserDuringTurns", value: boolean): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
+  listAccounts(): Promise<{ accounts: SwitcherAccountSummary[]; activeAccountId: string | null }>;
+  switchAccount(accountId: string): Promise<LauncherState>;
   logs(limit?: number): Promise<LogRecord[]>;
   openLogs(): Promise<string>;
   installUpdate(): Promise<boolean>;

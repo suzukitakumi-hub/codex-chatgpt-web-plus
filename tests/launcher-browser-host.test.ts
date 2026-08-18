@@ -175,6 +175,41 @@ test("launcher descriptor rejects non-loopback browser ownership", () => {
   expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("http://127.0.0.1");
 });
 
+function withPartition(path: string, partition: unknown): void {
+  const value = JSON.parse(readFileSync(path, "utf8"));
+  value.partition = partition;
+  writeFileSync(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+}
+
+test("launcher descriptor accepts the legacy partition and a well-formed per-account partition", () => {
+  const legacyPath = descriptorFile();
+  expect(readLauncherBrowserHostDescriptor(legacyPath).partition).toBe("persist:codex-web-gpt-chatgpt");
+
+  const perAccountPath = descriptorFile();
+  withPartition(perAccountPath, "persist:codex-web-gpt-chatgpt-11111111-1111-4111-8111-111111111111");
+  expect(readLauncherBrowserHostDescriptor(perAccountPath).partition).toBe(
+    "persist:codex-web-gpt-chatgpt-11111111-1111-4111-8111-111111111111",
+  );
+});
+
+test("launcher descriptor rejects a malformed partition instead of loosely prefix-matching it", () => {
+  const path = descriptorFile();
+  withPartition(path, "persist:codex-web-gpt-chatgpt-");
+  expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unexpected browser partition");
+
+  withPartition(path, "persist:codex-web-gpt-chatgpt-evil:thing");
+  expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unexpected browser partition");
+
+  withPartition(path, "persist:codex-web-gpt-chatgpt-not-mine/../etc");
+  expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unexpected browser partition");
+
+  withPartition(path, "persist:codex-web-gpt-chatgptx");
+  expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unexpected browser partition");
+
+  withPartition(path, `persist:codex-web-gpt-chatgpt-${"a".repeat(65)}`);
+  expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unexpected browser partition");
+});
+
 test("launcher page selection uses the owned surface marker instead of URL order", async () => {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
   const hiddenPage = {

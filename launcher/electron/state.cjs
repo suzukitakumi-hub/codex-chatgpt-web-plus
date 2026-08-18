@@ -20,6 +20,7 @@ const DEFAULT_STATE = Object.freeze({
   sidebarWidth: 252,
   mcpGuideStep: 0,
   sessionRefreshReminderAt: null,
+  activeAccountId: null,
 });
 
 function nextSessionRefreshReminderAt(now = Date.now()) {
@@ -64,6 +65,10 @@ function readState(filePath) {
       && (typeof state.sessionRefreshReminderAt !== "string"
         || !Number.isFinite(Date.parse(state.sessionRefreshReminderAt)))) {
       state.sessionRefreshReminderAt = DEFAULT_STATE.sessionRefreshReminderAt;
+    }
+    if (state.activeAccountId !== null
+      && (typeof state.activeAccountId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(state.activeAccountId))) {
+      state.activeAccountId = DEFAULT_STATE.activeAccountId;
     }
     for (const key of [
       "coreSetupComplete",

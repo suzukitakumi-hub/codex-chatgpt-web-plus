@@ -60,7 +60,7 @@ try {
     const stage = path.join(scratch, "stage");
     fs.mkdirSync(stage);
     run("ditto", ["-x", "-k", archive, stage]);
-    executable = path.join(stage, "Codex ChatGPT Web Plus.app", "Contents", "MacOS", "Codex ChatGPT Web Plus");
+    executable = path.join(stage, "Codex Master.app", "Contents", "MacOS", "Codex Master");
     command = executable;
     args = ["--launcher-smoke-test"];
   } else if (process.platform === "linux") {

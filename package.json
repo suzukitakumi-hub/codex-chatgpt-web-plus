@@ -1,6 +1,6 @@
 {
   "name": "codex-chatgpt-web-plus",
-  "version": "2.1.12",
+  "version": "2.2.0",
   "private": true,
   "description": "Hardened fork of codex-chatgpt-web: a focused local Responses bridge that runs Codex tasks through a user-authenticated ChatGPT web session.",
   "repository": {

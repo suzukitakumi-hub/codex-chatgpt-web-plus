@@ -6,6 +6,14 @@ import { processRunning } from "./process";
 
 export const LAUNCHER_BROWSER_HOST_KIND = "codex-web-gpt-launcher";
 
+const LEGACY_CHATGPT_PARTITION = "persist:codex-web-gpt-chatgpt";
+const PER_ACCOUNT_PARTITION_PATTERN = /^persist:codex-web-gpt-chatgpt-[A-Za-z0-9_-]{1,64}$/;
+
+function isAllowedLauncherPartition(value: unknown): value is string {
+  return value === LEGACY_CHATGPT_PARTITION
+    || (typeof value === "string" && PER_ACCOUNT_PARTITION_PATTERN.test(value));
+}
+
 export interface LauncherBrowserHostDescriptor {
   version: 1;
   kind: typeof LAUNCHER_BROWSER_HOST_KIND;
@@ -76,7 +84,7 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
   if (!helperScript || !existsSync(helperScript)) {
     throw new Error("Launcher browser descriptor helper script does not exist");
   }
-  if (descriptor.partition !== "persist:codex-web-gpt-chatgpt") {
+  if (!isAllowedLauncherPartition(descriptor.partition)) {
     throw new Error("Launcher browser descriptor identifies an unexpected browser partition");
   }
   if (descriptor.idleUrl !== "about:blank#codex-web-gpt-browser-host") {

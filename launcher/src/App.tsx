@@ -19,6 +19,7 @@ import type {
   LogRecord,
   OperationState,
   Surface,
+  SwitcherAccountSummary,
 } from "./types";
 
 const api = window.codexWebLauncher;
@@ -1353,6 +1354,11 @@ function SettingsSurface({
         </SettingRow>
       </div>
 
+      <SectionHeading label={copy.accountsSectionLabel} spaced />
+      <div className="settings-list">
+        <AccountSwitcherRow copy={copy} setError={setError} />
+      </div>
+
       <SectionHeading label={copy.diagnostics} spaced />
       <button className="diagnostic-row" disabled={busy} onClick={() => void runDoctor()} type="button">
         <Icon name="activity" />
@@ -1388,6 +1394,132 @@ function SettingsSurface({
         </span>
       </div>
     </ContentSurface>
+  );
+}
+
+function AccountSwitcherRow({
+  copy,
+  setError,
+}: {
+  copy: Copy;
+  setError: (error: string | null) => void;
+}) {
+  const [accounts, setAccounts] = useState<SwitcherAccountSummary[] | null>(null);
+  const [activeAccountId, setActiveAccountId] = useState<string | null>(null);
+  const [switching, setSwitching] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api!.listAccounts().then((result) => {
+      if (cancelled) return;
+      setAccounts(result.accounts);
+      setActiveAccountId(result.activeAccountId);
+    }).catch((cause) => setError(messageOf(cause)));
+    return () => { cancelled = true; };
+  }, [setError]);
+
+  const switchAccount = async (accountId: string) => {
+    if (switching || accountId === activeAccountId) return;
+    setSwitching(true);
+    setError(null);
+    try {
+      // On success the launcher relaunches itself, so there is normally nothing further to do
+      // here: this promise resolves right as the app quits, and the relaunch takes it from there.
+      await api!.switchAccount(accountId);
+      setActiveAccountId(accountId);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  return (
+    <SettingRow body={copy.switchAccountBody} label={copy.activeAccount}>
+      {accounts === null ? (
+        <span className="account-menu-loading">{copy.loading}</span>
+      ) : accounts.length === 0 ? (
+        <span className="account-menu-empty">{copy.noSwitcherAccounts}</span>
+      ) : (
+        <AccountMenu
+          accounts={accounts}
+          activeAccountId={activeAccountId}
+          busy={switching}
+          copy={copy}
+          onChange={(accountId) => void switchAccount(accountId)}
+        />
+      )}
+    </SettingRow>
+  );
+}
+
+function AccountMenu({
+  accounts,
+  activeAccountId,
+  busy,
+  copy,
+  onChange,
+}: {
+  accounts: SwitcherAccountSummary[];
+  activeAccountId: string | null;
+  busy: boolean;
+  copy: Copy;
+  onChange: (accountId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = accounts.find((account) => account.id === activeAccountId) ?? null;
+
+  return (
+    <div
+      className={`language-menu account-menu${open ? " is-open" : ""}`}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") setOpen(false);
+      }}
+    >
+      <button
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        className="language-menu-trigger"
+        disabled={busy}
+        onClick={() => setOpen((current) => !current)}
+        type="button"
+      >
+        <span>{busy ? copy.switchingAccount : selected?.name ?? copy.activeAccount}</span>
+        <Icon name="chevron" />
+      </button>
+      {open ? (
+        <>
+          <button
+            aria-label="Close account menu"
+            className="language-menu-scrim"
+            onClick={() => setOpen(false)}
+            type="button"
+          />
+          <div aria-label={copy.accountsSectionLabel} className="language-menu-panel" role="listbox">
+            {accounts.map((account) => (
+              <button
+                aria-selected={account.id === activeAccountId}
+                className={`account-menu-option${account.id === activeAccountId ? " is-selected" : ""}`}
+                disabled={busy}
+                key={account.id}
+                onClick={() => {
+                  setOpen(false);
+                  if (account.id !== activeAccountId) onChange(account.id);
+                }}
+                role="option"
+                type="button"
+              >
+                <span className="account-menu-option-identity">
+                  <strong>{account.name}</strong>
+                  {account.email ? <small>{account.email}</small> : null}
+                </span>
+                {account.id === activeAccountId ? <Icon name="check" /> : null}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : null}
+    </div>
   );
 }
 
@@ -1809,7 +1941,7 @@ function FatalMessage({ message }: { message: string }) {
   return (
     <main className="fatal-message">
       <BrandMark />
-      <h1>Codex Web GPT</h1>
+      <h1>Codex Master</h1>
       <p>{message}</p>
     </main>
   );
