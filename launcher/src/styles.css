@@ -659,6 +659,29 @@ code {
   white-space: nowrap;
 }
 
+.browser-address-trigger {
+  cursor: text;
+  text-align: left;
+}
+
+.browser-address-editing {
+  border-color: var(--color-border-focus);
+  background: var(--color-background-control-hover);
+}
+
+.browser-address-editing input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+}
+
+.browser-address-editing input::placeholder {
+  color: var(--color-text-tertiary);
+}
+
 .browser-zoom-controls {
   display: flex;
   height: 28px;

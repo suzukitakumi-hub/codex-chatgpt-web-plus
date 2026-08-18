@@ -60,6 +60,21 @@ export interface BrowserTabState {
   closable: boolean;
 }
 
+export interface AccountUsageWindow {
+  usedPercent: number;
+  windowMinutes: number | null;
+  resetsAt: number | null;
+}
+
+export interface AccountUsageInfo {
+  accountId: string;
+  available: boolean;
+  reason: string | null;
+  planType: string | null;
+  primary: AccountUsageWindow | null;
+  secondary: AccountUsageWindow | null;
+}
+
 export interface LogRecord {
   at: string;
   level: "debug" | "info" | "warning" | "error";
@@ -123,6 +138,7 @@ export interface LauncherApi {
   showBrowser(): Promise<BrowserState>;
   hideBrowser(): Promise<BrowserState>;
   navigateBrowser(action: "back" | "forward" | "reload"): Promise<BrowserState>;
+  navigateHome(url: string): Promise<BrowserState>;
   zoomBrowser(action: "in" | "out" | "reset"): Promise<BrowserState>;
   selectBrowserTab(tabId: string): Promise<BrowserState>;
   closeBrowserTab(tabId: string): Promise<BrowserState>;
@@ -145,8 +161,14 @@ export interface LauncherApi {
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
   setPreference(key: "keepRunningOnClose" | "showBrowserDuringTurns", value: boolean): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
-  listAccounts(): Promise<{ accounts: SwitcherAccountSummary[]; activeAccountId: string | null }>;
+  listAccounts(): Promise<{
+    accounts: SwitcherAccountSummary[];
+    activeAccountId: string | null;
+    storedActiveAccountId: string | null;
+    activeAccountDrift: boolean;
+  }>;
   switchAccount(accountId: string): Promise<LauncherState>;
+  fetchAccountUsage(accountId: string): Promise<AccountUsageInfo>;
   logs(limit?: number): Promise<LogRecord[]>;
   openLogs(): Promise<string>;
   installUpdate(): Promise<boolean>;

@@ -20,8 +20,11 @@ const {
   isCodexRunning,
   partitionForAccount,
   readSwitcherAccounts,
+  resolveActiveAccountId,
   writeCodexAuth,
 } = require("./accounts.cjs");
+const { fetchAccountUsage } = require("./account-usage.cjs");
+const { reconcileBridgeOnStartup } = require("./bridge-reconcile.cjs");
 const { BrowserHost } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
@@ -423,6 +426,7 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:browser-show", () => browserHost.reveal());
   handle("launcher:browser-hide", () => { browserHost?.hide(); return browserHost?.snapshot(); });
   handle("launcher:browser-navigate", (_event, action) => browserHost.navigate(action));
+  handle("launcher:browser-navigate-home", (_event, url) => browserHost.navigateHome(url));
   handle("launcher:browser-zoom", (_event, action) => browserHost.zoom(action));
   handle("launcher:browser-tab-select", (_event, tabId) => browserHost.selectTab(tabId));
   handle("launcher:browser-tab-close", (_event, tabId) => browserHost.closeTab(tabId));
@@ -603,10 +607,21 @@ function registerIpc({ logger, stateStore }) {
     return stateStore.update({ [key]: value === true });
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
-  handle("launcher:list-accounts", () => ({
-    accounts: readSwitcherAccounts(),
-    activeAccountId: stateStore.read().activeAccountId,
-  }));
+  handle("launcher:list-accounts", () => {
+    const storedActiveAccountId = stateStore.read().activeAccountId;
+    // `auth.json` -- not the stored preference above -- is the real source of truth for which
+    // account Codex is authenticated as: it can be rewritten out from under the launcher by other
+    // tools (e.g. `codex login` run directly), and the UI must reflect that reality rather than a
+    // stale stored id. The stored value is still what the partition decision elsewhere uses; it
+    // is only reported here so the UI can flag drift honestly.
+    const activeAccountId = resolveActiveAccountId();
+    return {
+      accounts: readSwitcherAccounts(),
+      activeAccountId,
+      storedActiveAccountId,
+      activeAccountDrift: activeAccountId !== storedActiveAccountId,
+    };
+  });
   handle("launcher:switch-account", async (_event, accountId) => {
     if (typeof accountId !== "string" || !accountId) throw new Error("Account id is required");
     const probe = isCodexRunning();
@@ -641,6 +656,14 @@ function registerIpc({ logger, stateStore }) {
       );
     }
     return state;
+  });
+  handle("launcher:account-usage", async (_event, accountId) => {
+    if (typeof accountId !== "string" || !accountId) throw new Error("Account id is required");
+    // Fetched lazily, only when the caller (the Settings account UI) asks -- never on a startup
+    // timer or a poll. Always resolves to a plain usage-or-unavailable object: fetchAccountUsage
+    // itself never throws, and it never refreshes the account's ChatGPT tokens (see its header
+    // comment for why that would corrupt the next account switch).
+    return await fetchAccountUsage(accountId, { logger });
   });
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
   handle("launcher:open-logs", async () => {
@@ -954,15 +977,8 @@ async function start() {
       });
     }
     try {
-      const route = await runtimeHost.bridgeStatus();
-      if (route.installed) {
-        const current = stateStore.read();
-        if (current.bridgeEnabled !== route.active) {
-          const state = stateStore.update({ bridgeEnabled: route.active });
-          send("launcher:state-changed", state);
-        }
-        if (!route.active) return { status: "bridge-disabled" };
-      }
+      const reconciled = await reconcileBridgeOnStartup({ runtimeHost, stateStore, logger, publishOperation });
+      if (reconciled.status === "bridge-disabled") return { status: "bridge-disabled" };
     } catch (error) {
       logger.warn("bridge.route_status_failed", {
         message: error instanceof Error ? error.message : String(error),

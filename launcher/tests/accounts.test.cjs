@@ -8,7 +8,9 @@ const {
   buildAuthDotJson,
   isCodexRunning,
   partitionForAccount,
+  readAccountChatGptAuth,
   readSwitcherAccounts,
+  resolveActiveAccountId,
   writeCodexAuth,
 } = require("../electron/accounts.cjs");
 
@@ -320,6 +322,48 @@ test("writeCodexAuth throws when the account id does not exist, without touching
   }
 });
 
+test("readAccountChatGptAuth returns only the access token and account id, never id_token or refresh_token", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switcher-chatgpt-auth-"));
+  try {
+    const accountsPath = path.join(root, "accounts.json");
+    fs.writeFileSync(accountsPath, JSON.stringify({
+      version: 1,
+      accounts: [chatGptAccount({ auth_data: { ...chatGptAccount().auth_data, account_id: "acct_123" } }), apiKeyAccount()],
+      active_account_id: null,
+      masked_account_ids: [],
+    }));
+
+    const auth = readAccountChatGptAuth(chatGptAccount().id, accountsPath);
+    assert.deepEqual(auth, { accessToken: "access-token-value", chatgptAccountId: "acct_123" });
+    assert.equal("id_token" in auth, false);
+    assert.equal("refresh_token" in auth, false);
+
+    assert.equal(readAccountChatGptAuth(apiKeyAccount().id, accountsPath), null);
+    assert.equal(readAccountChatGptAuth("does-not-exist", accountsPath), null);
+    assert.equal(readAccountChatGptAuth("", accountsPath), null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("readAccountChatGptAuth returns null account id when the field is absent or blank instead of a header the backend would reject", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switcher-chatgpt-auth-blank-"));
+  try {
+    const accountsPath = path.join(root, "accounts.json");
+    fs.writeFileSync(accountsPath, JSON.stringify({
+      version: 1,
+      accounts: [chatGptAccount({ auth_data: { ...chatGptAccount().auth_data, account_id: "   " } })],
+      active_account_id: null,
+      masked_account_ids: [],
+    }));
+
+    const auth = readAccountChatGptAuth(chatGptAccount().id, accountsPath);
+    assert.equal(auth.chatgptAccountId, null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("isCodexRunning fails closed and surfaces the reason when the process probe itself errors", () => {
   const failingSpawn = () => ({ error: new Error("command not found") });
   const result = isCodexRunning({ platform: "linux", spawn: failingSpawn });
@@ -356,4 +400,238 @@ test("isCodexRunning on posix uses an exact pgrep match", () => {
     running: false,
     reason: null,
   });
+});
+
+function base64UrlEncode(text) {
+  return Buffer.from(text, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function makeIdToken(payload) {
+  return `${base64UrlEncode(JSON.stringify({ alg: "none" }))}.${base64UrlEncode(JSON.stringify(payload))}.signature`;
+}
+
+function writeAccountsFile(accountsPath, accounts) {
+  fs.writeFileSync(accountsPath, JSON.stringify({
+    version: 1,
+    accounts,
+    active_account_id: null,
+    masked_account_ids: [],
+  }));
+}
+
+function resolveFixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switcher-resolve-active-"));
+  return {
+    root,
+    accountsPath: path.join(root, "accounts.json"),
+    codexHome: path.join(root, "codex-home"),
+    cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+function writeAuthDotJson(codexHome, payload) {
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.writeFileSync(path.join(codexHome, "auth.json"), JSON.stringify(payload));
+}
+
+test("resolveActiveAccountId matches on tokens.account_id when both sides have one", () => {
+  const fixture = resolveFixture();
+  try {
+    const work = chatGptAccount({
+      id: "work-account",
+      auth_data: {
+        type: "chat_g_p_t",
+        id_token: makeIdToken({ email: "work@example.com" }),
+        access_token: "a",
+        refresh_token: "r",
+        account_id: "acct_work",
+      },
+    });
+    const personal = chatGptAccount({
+      id: "personal-account",
+      auth_data: {
+        type: "chat_g_p_t",
+        id_token: makeIdToken({ email: "personal@example.com" }),
+        access_token: "a",
+        refresh_token: "r",
+        account_id: "acct_personal",
+      },
+    });
+    writeAccountsFile(fixture.accountsPath, [work, personal]);
+    writeAuthDotJson(fixture.codexHome, {
+      tokens: {
+        id_token: makeIdToken({ email: "personal@example.com" }),
+        access_token: "current-access",
+        refresh_token: "current-refresh",
+        account_id: "acct_work",
+      },
+    });
+
+    const resolved = resolveActiveAccountId({ accountsPath: fixture.accountsPath, codexHome: fixture.codexHome });
+    // account_id takes priority over the (deliberately mismatched) email claim above.
+    assert.equal(resolved, "work-account");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("resolveActiveAccountId falls back to the email claim decoded from tokens.id_token", () => {
+  const fixture = resolveFixture();
+  try {
+    const work = chatGptAccount({
+      id: "work-account",
+      auth_data: {
+        type: "chat_g_p_t",
+        id_token: makeIdToken({ email: "work@example.com" }),
+        access_token: "a",
+        refresh_token: "r",
+        account_id: null,
+      },
+    });
+    writeAccountsFile(fixture.accountsPath, [work]);
+    writeAuthDotJson(fixture.codexHome, {
+      tokens: {
+        id_token: makeIdToken({ email: "work@example.com" }),
+        access_token: "current-access",
+        refresh_token: "current-refresh",
+      },
+    });
+
+    const resolved = resolveActiveAccountId({ accountsPath: fixture.accountsPath, codexHome: fixture.codexHome });
+    assert.equal(resolved, "work-account");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("resolveActiveAccountId matches API-key auth on the stored key", () => {
+  const fixture = resolveFixture();
+  try {
+    const key = apiKeyAccount({ id: "api-account" });
+    writeAccountsFile(fixture.accountsPath, [key]);
+    writeAuthDotJson(fixture.codexHome, { OPENAI_API_KEY: "sk-abcdefghijklmnopqrstuvwxyz" });
+
+    const resolved = resolveActiveAccountId({ accountsPath: fixture.accountsPath, codexHome: fixture.codexHome });
+    assert.equal(resolved, "api-account");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("resolveActiveAccountId treats a malformed/garbage id_token as no match instead of throwing", () => {
+  const fixture = resolveFixture();
+  try {
+    const work = chatGptAccount({
+      id: "work-account",
+      auth_data: {
+        type: "chat_g_p_t",
+        id_token: makeIdToken({ email: "work@example.com" }),
+        access_token: "a",
+        refresh_token: "r",
+        account_id: null,
+      },
+    });
+    writeAccountsFile(fixture.accountsPath, [work]);
+    writeAuthDotJson(fixture.codexHome, {
+      tokens: {
+        id_token: "not-a-real-jwt",
+        access_token: "current-access",
+        refresh_token: "current-refresh",
+      },
+    });
+
+    let resolved;
+    assert.doesNotThrow(() => {
+      resolved = resolveActiveAccountId({ accountsPath: fixture.accountsPath, codexHome: fixture.codexHome });
+    });
+    assert.equal(resolved, null);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("resolveActiveAccountId returns null when auth.json is absent", () => {
+  const fixture = resolveFixture();
+  try {
+    writeAccountsFile(fixture.accountsPath, [chatGptAccount({ id: "work-account" })]);
+    // codexHome is never created, so auth.json cannot exist.
+    const resolved = resolveActiveAccountId({ accountsPath: fixture.accountsPath, codexHome: fixture.codexHome });
+    assert.equal(resolved, null);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("resolveActiveAccountId returns null, not a stale id, when auth.json matches none of the known accounts", () => {
+  const fixture = resolveFixture();
+  try {
+    const work = chatGptAccount({
+      id: "work-account",
+      auth_data: {
+        type: "chat_g_p_t",
+        id_token: makeIdToken({ email: "work@example.com" }),
+        access_token: "a",
+        refresh_token: "r",
+        account_id: "acct_work",
+      },
+    });
+    writeAccountsFile(fixture.accountsPath, [work]);
+    writeAuthDotJson(fixture.codexHome, {
+      tokens: {
+        id_token: makeIdToken({ email: "someone-else@example.com" }),
+        access_token: "current-access",
+        refresh_token: "current-refresh",
+        account_id: "acct_unknown",
+      },
+    });
+
+    const resolved = resolveActiveAccountId({ accountsPath: fixture.accountsPath, codexHome: fixture.codexHome });
+    assert.equal(resolved, null);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("resolveActiveAccountId never leaks token, key, or JWT material in its return value", () => {
+  const fixture = resolveFixture();
+  try {
+    const idToken = makeIdToken({ email: "work@example.com" });
+    const work = chatGptAccount({
+      id: "work-account",
+      auth_data: {
+        type: "chat_g_p_t",
+        id_token: idToken,
+        access_token: "super-secret-access-token",
+        refresh_token: "super-secret-refresh-token",
+        account_id: "acct_work",
+      },
+    });
+    const key = apiKeyAccount({ id: "api-account", auth_data: { type: "api_key", key: "sk-super-secret-key-value" } });
+    writeAccountsFile(fixture.accountsPath, [work, key]);
+    writeAuthDotJson(fixture.codexHome, {
+      tokens: {
+        id_token: idToken,
+        access_token: "current-secret-access-token",
+        refresh_token: "current-secret-refresh-token",
+        account_id: "acct_work",
+      },
+    });
+
+    const resolved = resolveActiveAccountId({ accountsPath: fixture.accountsPath, codexHome: fixture.codexHome });
+    assert.equal(resolved, "work-account");
+    assert.equal(typeof resolved, "string");
+    const serialized = JSON.stringify(resolved);
+    for (const secret of [
+      idToken,
+      "super-secret-access-token",
+      "super-secret-refresh-token",
+      "sk-super-secret-key-value",
+      "current-secret-access-token",
+      "current-secret-refresh-token",
+    ]) {
+      assert.equal(serialized.includes(secret), false);
+    }
+  } finally {
+    fixture.cleanup();
+  }
 });

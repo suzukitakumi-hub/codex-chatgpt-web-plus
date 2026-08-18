@@ -15,6 +15,7 @@ const {
   constrainBrowserBounds,
   navigateBrowser,
   readBrowserNavigationState,
+  validateNavigableUrl,
 } = require("./browser-state.cjs");
 
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
@@ -997,6 +998,24 @@ class BrowserHost {
     }
     const contents = this.activeView().webContents;
     navigateBrowser(contents, action);
+    return this.snapshot();
+  }
+
+  // Navigates the HOME surface only (never a turn tab, never the auth popup) to a user-supplied
+  // address. `rawUrl` is untrusted renderer input; validateNavigableUrl() is the allow-list gate
+  // that runs here in the main process and rejects everything but absolute http:/https: URLs
+  // (file:, javascript:, data:, blob:, chrome:, devtools:, ... are all rejected). This reuses the
+  // exact same running-turn/manual-operation guards as navigate() above, so address-bar
+  // navigation can never interrupt a live Codex turn or an in-flight manual operation.
+  async navigateHome(rawUrl) {
+    if (this.activeTraceId) {
+      throw new Error("Browser navigation is locked while ChatGPT is running a Codex turn");
+    }
+    if (this.manualOperation) {
+      throw new Error(`Browser navigation is locked during ${this.manualOperation}`);
+    }
+    const url = validateNavigableUrl(rawUrl);
+    await this.view.webContents.loadURL(url);
     return this.snapshot();
   }
 

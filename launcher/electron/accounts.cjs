@@ -155,6 +155,119 @@ function writeCodexAuth(accountId, { accountsPath, codexHome, now } = {}) {
   return authPath;
 }
 
+function authDotJsonPath(codexHome) {
+  const home = codexHome ? expandHomePath(codexHome) : codexHomeDir();
+  return path.join(home, "auth.json");
+}
+
+// `~/.codex/auth.json` can be rewritten by other tools (e.g. running `codex` and logging in
+// directly), so it is read fresh every time and never cached.
+function readAuthDotJson(authPath) {
+  let text;
+  try {
+    text = fs.readFileSync(authPath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    // A corrupt auth.json is exactly as "no active account" as a missing one -- never throw here.
+    return null;
+  }
+}
+
+function base64UrlDecode(segment) {
+  const normalized = segment.replace(/-/g, "+").replace(/_/g, "/");
+  const padLength = (4 - (normalized.length % 4)) % 4;
+  return Buffer.from(normalized + "=".repeat(padLength), "base64").toString("utf8");
+}
+
+// Defensive JWT payload decode: any malformed/garbage token (wrong segment count, invalid
+// base64url, invalid JSON, non-string email claim) resolves to "no email claim" rather than
+// throwing, since a broken token is not grounds to crash account resolution.
+function decodeIdTokenEmail(idToken) {
+  if (typeof idToken !== "string" || !idToken) return null;
+  const parts = idToken.split(".");
+  if (parts.length < 2) return null;
+  try {
+    const payload = JSON.parse(base64UrlDecode(parts[1]));
+    return typeof payload?.email === "string" && payload.email ? payload.email : null;
+  } catch {
+    return null;
+  }
+}
+
+// Derives which Codex Switcher Plus account (if any) the CURRENT ~/.codex/auth.json corresponds
+// to. auth.json -- not the launcher's persisted `activeAccountId` -- is the real source of truth
+// for "which account is Codex authenticated as", since other tools (e.g. `codex login` run
+// directly) can rewrite it out from under the launcher. This never trusts a stored id; it always
+// re-derives from what is actually on disk right now.
+//
+// Match priority: tokens.account_id when both the current auth.json and a candidate account have
+// one; otherwise the `email` claim decoded from tokens.id_token; for API-key auth, the stored key
+// itself. Returns the matching account id, or null when auth.json is absent, unparsable, or
+// matches no known account.
+//
+// NEVER returns or logs token values, the API key, or the raw JWT -- only an account id or null.
+function resolveActiveAccountId({ accountsPath, codexHome } = {}) {
+  const auth = readAuthDotJson(authDotJsonPath(codexHome));
+  if (!auth) return null;
+  const accounts = readRawSwitcherAccounts(accountsPath);
+
+  if (nonEmptyString(auth.OPENAI_API_KEY)) {
+    const match = accounts.find((candidate) => (
+      typeof candidate?.id === "string" && candidate.id
+      && isApiKeyAuthData(candidate.auth_data)
+      && nonEmptyString(candidate.auth_data.key)
+      && candidate.auth_data.key === auth.OPENAI_API_KEY
+    ));
+    return match ? match.id : null;
+  }
+
+  const tokens = auth.tokens;
+  if (!tokens || typeof tokens !== "object") return null;
+  const chatGptCandidates = accounts.filter((candidate) => (
+    typeof candidate?.id === "string" && candidate.id && isChatGptAuthData(candidate?.auth_data)
+  ));
+
+  if (nonEmptyString(tokens.account_id)) {
+    const match = chatGptCandidates.find((candidate) => (
+      nonEmptyString(candidate.auth_data.account_id)
+      && candidate.auth_data.account_id === tokens.account_id
+    ));
+    if (match) return match.id;
+  }
+
+  const authEmail = decodeIdTokenEmail(tokens.id_token);
+  if (authEmail) {
+    const match = chatGptCandidates.find((candidate) => decodeIdTokenEmail(candidate.auth_data.id_token) === authEmail);
+    if (match) return match.id;
+  }
+
+  return null;
+}
+
+// Returns only what a ChatGPT-authenticated network call needs (the bearer token and the
+// optional chatgpt-account-id header value) for one Codex Switcher Plus account, or null when the
+// account does not exist or is not signed in with ChatGPT (e.g. it uses an API key). Never returns
+// id_token or refresh_token: callers of this accessor have no legitimate use for either, and
+// keeping them out here means a bug in a caller can never leak them.
+function readAccountChatGptAuth(accountId, filePath) {
+  if (typeof accountId !== "string" || !accountId) return null;
+  const accounts = readRawSwitcherAccounts(filePath);
+  const account = accounts.find((candidate) => candidate?.id === accountId);
+  if (!account) return null;
+  const authData = account.auth_data;
+  if (!isChatGptAuthData(authData) || !nonEmptyString(authData.access_token)) return null;
+  return {
+    accessToken: authData.access_token,
+    chatgptAccountId: nonEmptyString(authData.account_id) ? authData.account_id : null,
+  };
+}
+
 function partitionForAccount(accountId) {
   if (accountId === null || accountId === undefined) return LEGACY_CHATGPT_PARTITION;
   if (typeof accountId !== "string" || !ACCOUNT_ID_PATTERN.test(accountId)) {
@@ -213,7 +326,9 @@ module.exports = {
   codexHomeDir,
   isCodexRunning,
   partitionForAccount,
+  readAccountChatGptAuth,
   readSwitcherAccounts,
+  resolveActiveAccountId,
   switcherAccountsPath,
   writeCodexAuth,
 };

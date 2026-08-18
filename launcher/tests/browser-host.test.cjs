@@ -7,6 +7,7 @@ const {
   constrainBrowserBounds,
   navigateBrowser,
   readBrowserNavigationState,
+  validateNavigableUrl,
 } = require("../electron/browser-state.cjs");
 const {
   allowedAuthUrl,
@@ -531,6 +532,123 @@ test("browser chrome navigation delegates to WebContents navigation history", ()
 
   assert.deepEqual(calls, ["back", "reload"]);
   assert.throws(() => navigateBrowser(webContents, "unknown"), /Unknown browser navigation action/);
+});
+
+test("validateNavigableUrl accepts absolute http/https URLs unchanged", () => {
+  assert.equal(validateNavigableUrl("https://trustlogin.example.com/sso"), "https://trustlogin.example.com/sso");
+  assert.equal(validateNavigableUrl("  https://example.com/path?q=1  "), "https://example.com/path?q=1");
+  assert.equal(validateNavigableUrl("http://example.com/"), "http://example.com/");
+});
+
+test("validateNavigableUrl infers https:// for a bare hostname typed without a scheme", () => {
+  assert.equal(validateNavigableUrl("trustlogin.com"), "https://trustlogin.com/");
+  assert.equal(validateNavigableUrl("trustlogin.com/launch?app=chatgpt"), "https://trustlogin.com/launch?app=chatgpt");
+});
+
+test("validateNavigableUrl rejects every non-http(s) scheme, however it is spelled", () => {
+  for (const rejected of [
+    "file:///etc/passwd",
+    "javascript:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "blob:https://example.com/uuid",
+    "chrome://settings",
+    "devtools://devtools/bundled/inspector.html",
+    "ftp://example.com/file",
+  ]) {
+    assert.throws(() => validateNavigableUrl(rejected), /http|https/i, `expected ${rejected} to be rejected`);
+  }
+});
+
+test("validateNavigableUrl rejects empty, whitespace-only, and non-string input with a clear message", () => {
+  assert.throws(() => validateNavigableUrl(""), /Enter a URL/);
+  assert.throws(() => validateNavigableUrl("   "), /Enter a URL/);
+  assert.throws(() => validateNavigableUrl(null), /URL is required/);
+  assert.throws(() => validateNavigableUrl(undefined), /URL is required/);
+  assert.throws(() => validateNavigableUrl(42), /URL is required/);
+});
+
+test("validateNavigableUrl rejects unparseable garbage instead of silently passing it through", () => {
+  assert.throws(() => validateNavigableUrl("https://"), /not a valid URL/);
+  assert.throws(() => validateNavigableUrl("::::"), /not a valid URL|http/i);
+});
+
+test("navigateHome loads a validated URL on the home surface and returns the fresh snapshot", async () => {
+  const calls = [];
+  const fixture = {
+    activeTraceId: null,
+    manualOperation: null,
+    view: {
+      webContents: {
+        loadURL: async (url) => { calls.push(url); },
+      },
+    },
+    snapshot() { return { url: "https://trustlogin.example.com/" }; },
+  };
+
+  const result = await BrowserHost.prototype.navigateHome.call(fixture, "trustlogin.example.com");
+  assert.deepEqual(calls, ["https://trustlogin.example.com/"]);
+  assert.deepEqual(result, { url: "https://trustlogin.example.com/" });
+});
+
+test("navigateHome rejects a disallowed scheme before ever touching webContents", async () => {
+  const calls = [];
+  const fixture = {
+    activeTraceId: null,
+    manualOperation: null,
+    view: { webContents: { loadURL: async (url) => { calls.push(url); } } },
+  };
+
+  await assert.rejects(
+    BrowserHost.prototype.navigateHome.call(fixture, "javascript:alert(1)"),
+    /http|https/i,
+  );
+  assert.deepEqual(calls, []);
+});
+
+test("navigateHome is locked while a Codex turn is running, exactly like navigate()", async () => {
+  const calls = [];
+  const fixture = {
+    activeTraceId: "trace-123",
+    manualOperation: null,
+    view: { webContents: { loadURL: async (url) => { calls.push(url); } } },
+  };
+
+  await assert.rejects(
+    BrowserHost.prototype.navigateHome.call(fixture, "https://example.com"),
+    /locked while ChatGPT is running a Codex turn/,
+  );
+  assert.deepEqual(calls, []);
+});
+
+test("navigateHome is locked during a manual operation, exactly like navigate()", async () => {
+  const calls = [];
+  const fixture = {
+    activeTraceId: null,
+    manualOperation: "ChatGPT login",
+    view: { webContents: { loadURL: async (url) => { calls.push(url); } } },
+  };
+
+  await assert.rejects(
+    BrowserHost.prototype.navigateHome.call(fixture, "https://example.com"),
+    /locked during ChatGPT login/,
+  );
+  assert.deepEqual(calls, []);
+});
+
+test("navigateHome never touches a turn tab's WebContents", async () => {
+  const homeCalls = [];
+  const turnCalls = [];
+  const fixture = {
+    activeTraceId: null,
+    manualOperation: null,
+    view: { webContents: { loadURL: async (url) => { homeCalls.push(url); } } },
+    turnTabs: new Map([["turn", { view: { webContents: { loadURL: async (url) => { turnCalls.push(url); } } } }]]),
+    snapshot() { return { url: "https://example.com/" }; },
+  };
+
+  await BrowserHost.prototype.navigateHome.call(fixture, "https://example.com");
+  assert.deepEqual(homeCalls, ["https://example.com/"]);
+  assert.deepEqual(turnCalls, []);
 });
 
 test("browser zoom in, out, and reset are symmetric across owned views", () => {

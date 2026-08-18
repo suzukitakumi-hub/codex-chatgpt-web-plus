@@ -11,6 +11,8 @@ import {
 import { copyFor, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import type {
+  AccountUsageInfo,
+  AccountUsageWindow,
   BrowserState,
   DoctorReport,
   Language,
@@ -777,10 +779,12 @@ function BrowserSurface({
           />
           <IconButton disabled={navigationLocked || !visible} icon="reload" label={copy.reload} onClick={() => void navigate("reload")} />
         </div>
-        <div className="browser-address" title={browser?.url || copy.browserAddress}>
-          <Icon name="globe" />
-          <span>{formatBrowserAddress(browser?.url, copy)}</span>
-        </div>
+        <BrowserAddressBar
+          browser={browser}
+          copy={copy}
+          navigationLocked={navigationLocked}
+          setError={setError}
+        />
         <div className="browser-zoom-controls">
           <IconButton icon="minus" label={copy.zoomOut} onClick={() => void zoom("out")} />
           <button
@@ -816,6 +820,129 @@ function BrowserSurface({
         )}
       </div>
     </section>
+  );
+}
+
+// Non-authoritative mirror of the main process's validateNavigableUrl() (electron/browser-state.cjs),
+// used only to give the user immediate, localized feedback without a round trip. The main process
+// re-validates every navigateHome() call regardless -- this check exists purely for UX and must
+// never be treated as the security boundary.
+function looksLikeInvalidHomeUrl(candidate: string): boolean {
+  const trimmed = candidate.trim();
+  if (!trimmed) return true;
+  const hasAuthorityScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed);
+  const hasNoAuthorityScheme = /^(javascript|data|blob|vbscript):/i.test(trimmed);
+  const withScheme = hasAuthorityScheme || hasNoAuthorityScheme ? trimmed : `https://${trimmed}`;
+  try {
+    const parsed = new URL(withScheme);
+    return parsed.protocol !== "http:" && parsed.protocol !== "https:";
+  } catch {
+    return true;
+  }
+}
+
+function BrowserAddressBar({
+  browser,
+  copy,
+  navigationLocked,
+  setError,
+}: {
+  browser: BrowserState | null;
+  copy: Copy;
+  navigationLocked: boolean;
+  setError: (error: string | null) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  // Only the home surface accepts a typed address; a turn tab or the auth popup never does.
+  const isHome = browser ? browser.activeTabId === "home" : true;
+  const displayValue = formatBrowserAddress(browser?.url, copy);
+
+  useEffect(() => {
+    if (editing) inputRef.current?.select();
+  }, [editing]);
+
+  const beginEdit = () => {
+    if (!isHome || navigationLocked) return;
+    const current = browser?.url ?? "";
+    setValue(current.startsWith("about:blank") ? "" : current);
+    setError(null);
+    setEditing(true);
+  };
+
+  const cancelEdit = () => setEditing(false);
+
+  const submit = async () => {
+    const target = value.trim();
+    if (!target) {
+      setEditing(false);
+      return;
+    }
+    if (looksLikeInvalidHomeUrl(target)) {
+      setError(copy.browserAddressInvalidUrl);
+      return;
+    }
+    setEditing(false);
+    try {
+      await api!.navigateHome(target);
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+
+  if (!isHome || (!editing && navigationLocked)) {
+    return (
+      <div className="browser-address" title={browser?.url || copy.browserAddress}>
+        <Icon name="globe" />
+        <span>{displayValue}</span>
+      </div>
+    );
+  }
+
+  if (!editing) {
+    return (
+      <button
+        aria-label={copy.browserAddressLabel}
+        className="browser-address browser-address-trigger"
+        onClick={beginEdit}
+        title={browser?.url || copy.browserAddress}
+        type="button"
+      >
+        <Icon name="globe" />
+        <span>{displayValue}</span>
+      </button>
+    );
+  }
+
+  return (
+    <form
+      className="browser-address browser-address-editing"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit();
+      }}
+    >
+      <Icon name="globe" />
+      <input
+        aria-label={copy.browserAddressLabel}
+        autoCapitalize="none"
+        autoCorrect="off"
+        onBlur={cancelEdit}
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            cancelEdit();
+          }
+        }}
+        placeholder={copy.browserAddressPlaceholder}
+        ref={inputRef}
+        spellCheck={false}
+        type="text"
+        value={value}
+      />
+    </form>
   );
 }
 
@@ -1435,20 +1562,94 @@ function AccountSwitcherRow({
   };
 
   return (
-    <SettingRow body={copy.switchAccountBody} label={copy.activeAccount}>
-      {accounts === null ? (
-        <span className="account-menu-loading">{copy.loading}</span>
-      ) : accounts.length === 0 ? (
-        <span className="account-menu-empty">{copy.noSwitcherAccounts}</span>
-      ) : (
-        <AccountMenu
-          accounts={accounts}
-          activeAccountId={activeAccountId}
-          busy={switching}
-          copy={copy}
-          onChange={(accountId) => void switchAccount(accountId)}
-        />
-      )}
+    <>
+      <SettingRow body={copy.switchAccountBody} label={copy.activeAccount}>
+        {accounts === null ? (
+          <span className="account-menu-loading">{copy.loading}</span>
+        ) : accounts.length === 0 ? (
+          <span className="account-menu-empty">{copy.noSwitcherAccounts}</span>
+        ) : (
+          <AccountMenu
+            accounts={accounts}
+            activeAccountId={activeAccountId}
+            busy={switching}
+            copy={copy}
+            onChange={(accountId) => void switchAccount(accountId)}
+          />
+        )}
+      </SettingRow>
+      {activeAccountId ? <AccountUsageRow accountId={activeAccountId} copy={copy} /> : null}
+    </>
+  );
+}
+
+function formatUsageResetTime(resetsAt: number | null): string | null {
+  if (resetsAt === null) return null;
+  const parsed = new Date(resetsAt * 1000);
+  if (Number.isNaN(parsed.getTime())) return null;
+  try {
+    return parsed.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+  } catch {
+    return parsed.toISOString();
+  }
+}
+
+function formatUsageWindow(label: string, resetLabel: string, window: AccountUsageWindow | null): string | null {
+  if (!window) return null;
+  const percent = `${Math.round(window.usedPercent)}%`;
+  const resetTime = formatUsageResetTime(window.resetsAt);
+  return resetTime ? `${label} ${percent} (${resetLabel} ${resetTime})` : `${label} ${percent}`;
+}
+
+function formatUsageSummary(usage: AccountUsageInfo | null, copy: Copy): string {
+  if (!usage) return copy.usageUnavailable;
+  if (!usage.available) return usage.reason ?? copy.usageUnavailable;
+  const parts = [
+    formatUsageWindow(copy.usageSessionWindow, copy.usageResetsAt, usage.primary),
+    formatUsageWindow(copy.usageWeeklyWindow, copy.usageResetsAt, usage.secondary),
+  ].filter((part): part is string => Boolean(part));
+  if (parts.length === 0) return usage.planType ?? copy.usageUnavailable;
+  const planPrefix = usage.planType ? `${usage.planType} · ` : "";
+  return `${planPrefix}${parts.join(" · ")}`;
+}
+
+// Fetched lazily -- only when the account UI mounts (i.e. Settings is open) or the user presses
+// Refresh -- never on a startup timer or a poll, since this hits the user's real ChatGPT account.
+function AccountUsageRow({ accountId, copy }: { accountId: string; copy: Copy }) {
+  const [usage, setUsage] = useState<AccountUsageInfo | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
+  const load = useCallback(async (id: string) => {
+    setLoading(true);
+    setFetchError(null);
+    try {
+      setUsage(await api!.fetchAccountUsage(id));
+    } catch (cause) {
+      setFetchError(messageOf(cause));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    setUsage(null);
+    setFetchError(null);
+    void load(accountId);
+  }, [accountId, load]);
+
+  const body = loading ? copy.loading : fetchError ?? formatUsageSummary(usage, copy);
+
+  return (
+    <SettingRow body={body} label={copy.usageTitle}>
+      <button
+        className="text-button"
+        disabled={loading}
+        onClick={() => void load(accountId)}
+        type="button"
+      >
+        {copy.usageRefresh}
+      </button>
     </SettingRow>
   );
 }
