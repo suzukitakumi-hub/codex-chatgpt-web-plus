@@ -268,6 +268,34 @@ function readAccountChatGptAuth(accountId, filePath) {
   };
 }
 
+// Resolves the ChatGPT bearer credential to use for one Codex Switcher Plus account's usage
+// lookup. ~/.codex-switcher/accounts.json is a snapshot written by an app that is no longer
+// installed, so any token stored there only gets staler over time and eventually stops working.
+// ~/.codex/auth.json, by contrast, is kept continuously refreshed by Codex itself for whichever
+// account it is currently authenticated as. So: when auth.json currently belongs to this same
+// account -- per resolveActiveAccountId, which already does this exact identity match, reused
+// here rather than re-implemented -- prefer its access_token; otherwise fall back to the stored
+// token in accounts.json, exactly as before. auth.json may also hold an API-key credential
+// instead of ChatGPT OAuth tokens; that has no bearer token usable for this endpoint, so it falls
+// back to the stored token (or null) the same as any other non-match, rather than returning
+// something malformed. Never refreshes a token, never writes to accounts.json or auth.json, and
+// returns only the same {accessToken, chatgptAccountId} shape as readAccountChatGptAuth -- never
+// id_token or refresh_token.
+function resolveAccountChatGptAuth(accountId, { accountsPath, codexHome } = {}) {
+  if (typeof accountId !== "string" || !accountId) return null;
+  if (resolveActiveAccountId({ accountsPath, codexHome }) === accountId) {
+    const auth = readAuthDotJson(authDotJsonPath(codexHome));
+    const tokens = auth?.tokens;
+    if (tokens && typeof tokens === "object" && nonEmptyString(tokens.access_token)) {
+      return {
+        accessToken: tokens.access_token,
+        chatgptAccountId: nonEmptyString(tokens.account_id) ? tokens.account_id : null,
+      };
+    }
+  }
+  return readAccountChatGptAuth(accountId, accountsPath);
+}
+
 function partitionForAccount(accountId) {
   if (accountId === null || accountId === undefined) return LEGACY_CHATGPT_PARTITION;
   if (typeof accountId !== "string" || !ACCOUNT_ID_PATTERN.test(accountId)) {
@@ -328,6 +356,7 @@ module.exports = {
   partitionForAccount,
   readAccountChatGptAuth,
   readSwitcherAccounts,
+  resolveAccountChatGptAuth,
   resolveActiveAccountId,
   switcherAccountsPath,
   writeCodexAuth,

@@ -592,6 +592,7 @@ function LauncherShell({
             {surface === "activity" ? <ActivitySurface copy={copy} logs={logs} setError={setError} /> : null}
             {surface === "settings" ? (
               <SettingsSurface
+                browser={browser}
                 copy={copy}
                 language={language}
                 setError={setError}
@@ -1368,12 +1369,14 @@ function ActivitySurface({
 }
 
 function SettingsSurface({
+  browser,
   copy,
   language,
   setError,
   snapshot,
   updateState,
 }: {
+  browser: BrowserState | null;
   copy: Copy;
   language: Language;
   setError: (error: string | null) => void;
@@ -1483,7 +1486,7 @@ function SettingsSurface({
 
       <SectionHeading label={copy.accountsSectionLabel} spaced />
       <div className="settings-list">
-        <AccountSwitcherRow copy={copy} setError={setError} />
+        <AccountSwitcherRow browser={browser} copy={copy} setError={setError} />
       </div>
 
       <SectionHeading label={copy.diagnostics} spaced />
@@ -1525,9 +1528,11 @@ function SettingsSurface({
 }
 
 function AccountSwitcherRow({
+  browser,
   copy,
   setError,
 }: {
+  browser: BrowserState | null;
   copy: Copy;
   setError: (error: string | null) => void;
 }) {
@@ -1561,6 +1566,8 @@ function AccountSwitcherRow({
     }
   };
 
+  const activeAccountEmail = accounts?.find((account) => account.id === activeAccountId)?.email ?? null;
+
   return (
     <>
       <SettingRow body={copy.switchAccountBody} label={copy.activeAccount}>
@@ -1579,6 +1586,7 @@ function AccountSwitcherRow({
         )}
       </SettingRow>
       {activeAccountId ? <AccountUsageRow accountId={activeAccountId} copy={copy} /> : null}
+      <ChatGptIdentityNotice activeAccountEmail={activeAccountEmail} browser={browser} copy={copy} />
     </>
   );
 }
@@ -1601,9 +1609,21 @@ function formatUsageWindow(label: string, resetLabel: string, window: AccountUsa
   return resetTime ? `${label} ${percent} (${resetLabel} ${resetTime})` : `${label} ${percent}`;
 }
 
+// The main process only ever sends a stable reason code (see AccountUsageUnavailableReason in
+// src/types.ts) -- never English prose -- so every localized string for it lives here, not in
+// electron/account-usage.cjs.
+function usageReasonText(reason: AccountUsageInfo["reason"], copy: Copy): string {
+  switch (reason) {
+    case "token-invalid": return copy.usageReasonTokenInvalid;
+    case "no-account": return copy.usageReasonNoAccount;
+    case "request-failed": return copy.usageReasonRequestFailed;
+    default: return copy.usageUnavailable;
+  }
+}
+
 function formatUsageSummary(usage: AccountUsageInfo | null, copy: Copy): string {
   if (!usage) return copy.usageUnavailable;
-  if (!usage.available) return usage.reason ?? copy.usageUnavailable;
+  if (!usage.available) return usageReasonText(usage.reason, copy);
   const parts = [
     formatUsageWindow(copy.usageSessionWindow, copy.usageResetsAt, usage.primary),
     formatUsageWindow(copy.usageWeeklyWindow, copy.usageResetsAt, usage.secondary),
@@ -1651,6 +1671,41 @@ function AccountUsageRow({ accountId, copy }: { accountId: string; copy: Copy })
         {copy.usageRefresh}
       </button>
     </SettingRow>
+  );
+}
+
+function normalizedEmail(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+// Read-only: which ChatGPT account the embedded browser's own session is actually signed in as,
+// shown next to the account switcher, with a warning if it does not match the selected Codex
+// account. Each account has its own isolated browser partition, so this genuinely can drift --
+// e.g. an SSO password manager autofilled the wrong login during sign-in -- and nothing else in
+// the UI would reveal that. `browser.signedInEmail` is populated lazily by the main process's
+// existing ChatGPT session probe (no polling added here); when it is not known yet, this renders
+// nothing rather than guessing.
+function ChatGptIdentityNotice({
+  activeAccountEmail,
+  browser,
+  copy,
+}: {
+  activeAccountEmail: string | null;
+  browser: BrowserState | null;
+  copy: Copy;
+}) {
+  const signedInEmail = browser?.signedInEmail ?? null;
+  if (!signedInEmail) return null;
+  const mismatch = activeAccountEmail !== null
+    && normalizedEmail(signedInEmail) !== normalizedEmail(activeAccountEmail);
+
+  return (
+    <>
+      <SettingRow body={signedInEmail} label={copy.chatgptIdentityLabel}>
+        <span />
+      </SettingRow>
+      {mismatch ? <NoticeRow icon="alert" tone="warning">{copy.chatgptIdentityMismatch}</NoticeRow> : null}
+    </>
   );
 }
 

@@ -10,6 +10,7 @@ const {
   partitionForAccount,
   readAccountChatGptAuth,
   readSwitcherAccounts,
+  resolveAccountChatGptAuth,
   resolveActiveAccountId,
   writeCodexAuth,
 } = require("../electron/accounts.cjs");
@@ -629,6 +630,173 @@ test("resolveActiveAccountId never leaks token, key, or JWT material in its retu
       "current-secret-access-token",
       "current-secret-refresh-token",
     ]) {
+      assert.equal(serialized.includes(secret), false);
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("resolveAccountChatGptAuth prefers the fresh access_token from auth.json when it currently belongs to the requested account", () => {
+  const fixture = resolveFixture();
+  try {
+    const work = chatGptAccount({
+      id: "work-account",
+      auth_data: {
+        type: "chat_g_p_t",
+        id_token: makeIdToken({ email: "work@example.com" }),
+        access_token: "stale-stored-access-token",
+        refresh_token: "stale-stored-refresh-token",
+        account_id: "acct_work",
+      },
+    });
+    writeAccountsFile(fixture.accountsPath, [work]);
+    writeAuthDotJson(fixture.codexHome, {
+      tokens: {
+        id_token: makeIdToken({ email: "work@example.com" }),
+        access_token: "fresh-auth-json-access-token",
+        refresh_token: "fresh-auth-json-refresh-token",
+        account_id: "acct_work",
+      },
+    });
+
+    const auth = resolveAccountChatGptAuth("work-account", {
+      accountsPath: fixture.accountsPath,
+      codexHome: fixture.codexHome,
+    });
+    assert.deepEqual(auth, { accessToken: "fresh-auth-json-access-token", chatgptAccountId: "acct_work" });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("resolveAccountChatGptAuth falls back to the stored token when auth.json currently belongs to a different account", () => {
+  const fixture = resolveFixture();
+  try {
+    const work = chatGptAccount({
+      id: "work-account",
+      auth_data: {
+        type: "chat_g_p_t",
+        id_token: makeIdToken({ email: "work@example.com" }),
+        access_token: "stored-work-access-token",
+        refresh_token: "r",
+        account_id: "acct_work",
+      },
+    });
+    const personal = chatGptAccount({
+      id: "personal-account",
+      auth_data: {
+        type: "chat_g_p_t",
+        id_token: makeIdToken({ email: "personal@example.com" }),
+        access_token: "stored-personal-access-token",
+        refresh_token: "r",
+        account_id: "acct_personal",
+      },
+    });
+    writeAccountsFile(fixture.accountsPath, [work, personal]);
+    // auth.json is currently authenticated as "personal", not "work".
+    writeAuthDotJson(fixture.codexHome, {
+      tokens: {
+        id_token: makeIdToken({ email: "personal@example.com" }),
+        access_token: "fresh-personal-access-token",
+        refresh_token: "r",
+        account_id: "acct_personal",
+      },
+    });
+
+    const auth = resolveAccountChatGptAuth("work-account", {
+      accountsPath: fixture.accountsPath,
+      codexHome: fixture.codexHome,
+    });
+    assert.deepEqual(auth, { accessToken: "stored-work-access-token", chatgptAccountId: "acct_work" });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("resolveAccountChatGptAuth falls back to the stored token when auth.json is absent", () => {
+  const fixture = resolveFixture();
+  try {
+    const work = chatGptAccount({
+      id: "work-account",
+      auth_data: {
+        type: "chat_g_p_t",
+        id_token: makeIdToken({ email: "work@example.com" }),
+        access_token: "stored-work-access-token",
+        refresh_token: "r",
+        account_id: "acct_work",
+      },
+    });
+    writeAccountsFile(fixture.accountsPath, [work]);
+    // codexHome is never created, so auth.json cannot exist.
+
+    const auth = resolveAccountChatGptAuth("work-account", {
+      accountsPath: fixture.accountsPath,
+      codexHome: fixture.codexHome,
+    });
+    assert.deepEqual(auth, { accessToken: "stored-work-access-token", chatgptAccountId: "acct_work" });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("resolveAccountChatGptAuth falls back to the stored token, never something malformed, when auth.json holds an API-key credential for the requested account", () => {
+  const fixture = resolveFixture();
+  try {
+    // The requested account itself uses API-key auth, and auth.json currently holds that same
+    // key -- so resolveActiveAccountId matches this account, but auth.json has no `tokens` (and
+    // thus no access_token) for this module to use.
+    const key = apiKeyAccount({ id: "api-account", auth_data: { type: "api_key", key: "sk-abcdefghijklmnopqrstuvwxyz" } });
+    writeAccountsFile(fixture.accountsPath, [key]);
+    writeAuthDotJson(fixture.codexHome, { OPENAI_API_KEY: "sk-abcdefghijklmnopqrstuvwxyz" });
+
+    const auth = resolveAccountChatGptAuth("api-account", {
+      accountsPath: fixture.accountsPath,
+      codexHome: fixture.codexHome,
+    });
+    // readAccountChatGptAuth (the fallback) returns null for API-key accounts: there is no bearer
+    // token to use for this endpoint, so unavailable is correct -- never a malformed credential.
+    assert.equal(auth, null);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("resolveAccountChatGptAuth never leaks token, key, or JWT material in its return value", () => {
+  const fixture = resolveFixture();
+  try {
+    const idToken = makeIdToken({ email: "work@example.com" });
+    const work = chatGptAccount({
+      id: "work-account",
+      auth_data: {
+        type: "chat_g_p_t",
+        id_token: idToken,
+        access_token: "super-secret-stored-access-token",
+        refresh_token: "super-secret-stored-refresh-token",
+        account_id: "acct_work",
+      },
+    });
+    writeAccountsFile(fixture.accountsPath, [work]);
+    writeAuthDotJson(fixture.codexHome, {
+      tokens: {
+        id_token: idToken,
+        access_token: "super-secret-fresh-access-token",
+        refresh_token: "super-secret-fresh-refresh-token",
+        account_id: "acct_work",
+      },
+    });
+
+    const auth = resolveAccountChatGptAuth("work-account", {
+      accountsPath: fixture.accountsPath,
+      codexHome: fixture.codexHome,
+    });
+    assert.equal(auth.accessToken, "super-secret-fresh-access-token");
+    assert.equal("id_token" in auth, false);
+    assert.equal("refresh_token" in auth, false);
+    const serialized = JSON.stringify(auth);
+    // The returned object legitimately contains the fresh access token (that is its whole job),
+    // but must never carry the id_token/refresh_token from either auth.json or accounts.json.
+    for (const secret of [idToken, "super-secret-stored-refresh-token", "super-secret-fresh-refresh-token"]) {
       assert.equal(serialized.includes(secret), false);
     }
   } finally {

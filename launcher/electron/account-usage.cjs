@@ -1,35 +1,46 @@
-// Per-account ChatGPT rate-limit usage, ported from Codex Switcher Plus
+// Per-account ChatGPT rate-limit usage.
+//
+// This was originally ported from Codex Switcher Plus's Rust reference
 // (src-tauri/src/api/usage.rs: send_chatgpt_warmup_request / build_chatgpt_headers /
-// extract_rate_limits / RateLimitWindow / RateLimitDetails).
+// extract_rate_limits / RateLimitWindow / RateLimitDetails), but that reference is now OUT OF
+// DATE relative to the live ChatGPT backend and must not be treated as the source of truth:
+//   - The model name it used (gpt-5.1-codex-mini) is now rejected by the API for ChatGPT accounts.
+//   - `stream: false` is now rejected outright ("Stream must be set to true").
+//   - With the correct model and streaming enabled, the response body no longer carries a
+//     `rate_limit` JSON object at all -- every rate-limit field now arrives as a response HEADER
+//     (see `normalizeUsageHeaders` below for the exact set).
 //
 // CRITICAL: this module must never refresh tokens. ~/.codex-switcher/accounts.json is owned by
-// Codex Switcher Plus; we only ever read it (via accounts.cjs). ChatGPT refresh tokens are
-// single-use and rotate on every refresh. If this module refreshed a token, the rotated value
-// would not be written back to accounts.json, so that account's stored refresh_token would go
-// stale -- and the NEXT account switch would write the now-dead token into ~/.codex/auth.json,
-// breaking that account's login with refresh_token_reused 401s. So: use the stored access_token
-// as-is, and on 401/403 report usage as unavailable. Never retry with a refreshed token.
-const { readAccountChatGptAuth } = require("./accounts.cjs");
+// Codex Switcher Plus, an app that is no longer installed on this machine; we only ever read it
+// (via accounts.cjs), and any token stored there just ages out over time since nothing refreshes
+// it. ChatGPT refresh tokens are single-use and rotate on every refresh: if this module refreshed
+// one, the rotated value would not be written back to accounts.json, so that account's stored
+// refresh_token would go stale -- and the NEXT account switch would write the now-dead token into
+// ~/.codex/auth.json, breaking that account's login with refresh_token_reused 401s. So: use
+// whichever access_token accounts.cjs's resolveAccountChatGptAuth hands back as-is (it prefers the
+// continuously-refreshed ~/.codex/auth.json when that file currently belongs to this account, and
+// otherwise falls back to the stored, possibly-stale token), and on 401/403 report usage as
+// unavailable. Never retry with a refreshed token.
+const { resolveAccountChatGptAuth } = require("./accounts.cjs");
 
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 const CODEX_RESPONSES_URL = `${CHATGPT_ORIGIN}/backend-api/codex/responses`;
 const DEFAULT_TIMEOUT_MS = 10_000;
-
-// Matches the reference implementation's window-length constants exactly, so the same
-// primary/secondary swap heuristic below stays correct if the backend ever reorders the windows.
-const SESSION_WINDOW_SECONDS = 5 * 60 * 60;
-const WEEKLY_WINDOW_SECONDS = 7 * 24 * 60 * 60;
 
 // A browser-like User-Agent, mirroring the reference client, so Cloudflare does not flag this
 // request as a bot and return a challenge page instead of the real response.
 const BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
   + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
-// The smallest request that still reaches the Codex responses pipeline and gets a rate_limit
-// payload back. stream: false and max_output_tokens: 1 keep the round trip and the account's
-// token spend both minimal -- this call exists to read rate-limit metadata, not to chat.
+// The smallest request that still reaches the Codex responses pipeline and gets rate-limit
+// headers back. `stream: true` is mandatory (the API rejects `false` with "Stream must be set to
+// true"). `max_output_tokens` is deliberately absent -- the API now rejects it outright
+// ("Unsupported parameter: max_output_tokens") -- so nothing here bounds how much the model could
+// produce. That is fine: we never read the streamed body (see `abortResponseBody`), so the
+// account is never charged for output nobody downloads, regardless of how much the model queues
+// up before we cancel the stream.
 const WARMUP_PAYLOAD = Object.freeze({
-  model: "gpt-5.1-codex-mini",
+  model: "gpt-5.4-mini",
   instructions: "You are Codex.",
   input: [
     {
@@ -43,13 +54,8 @@ const WARMUP_PAYLOAD = Object.freeze({
   parallel_tool_calls: false,
   reasoning: { effort: "low" },
   store: false,
-  stream: false,
-  max_output_tokens: 1,
+  stream: true,
 });
-
-function isFiniteNumber(value) {
-  return typeof value === "number" && Number.isFinite(value);
-}
 
 function nonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -59,7 +65,7 @@ function buildChatGptHeaders(accessToken, chatgptAccountId) {
   const headers = {
     "user-agent": BROWSER_USER_AGENT,
     authorization: `Bearer ${accessToken}`,
-    accept: "application/json, text/plain, */*",
+    accept: "text/event-stream",
     "accept-language": "en-US,en;q=0.9",
     origin: CHATGPT_ORIGIN,
     referer: CHATGPT_ORIGIN,
@@ -72,68 +78,77 @@ function buildChatGptHeaders(accessToken, chatgptAccountId) {
   return headers;
 }
 
-// Parses one raw `primary_window`/`secondary_window` entry. Anything that is not an object, or
-// that lacks a numeric used_percent, is not a usable window -- return null rather than guessing.
-function parseRawWindow(raw) {
-  if (!raw || typeof raw !== "object") return null;
-  if (!isFiniteNumber(raw.used_percent)) return null;
-  return {
-    usedPercent: raw.used_percent,
-    limitWindowSeconds: isFiniteNumber(raw.limit_window_seconds) ? raw.limit_window_seconds : null,
-    resetAt: isFiniteNumber(raw.reset_at) ? raw.reset_at : null,
-  };
-}
-
-function isSessionWindow(window) {
-  return window?.limitWindowSeconds === SESSION_WINDOW_SECONDS;
-}
-
-function isWeeklyWindow(window) {
-  return window?.limitWindowSeconds === WEEKLY_WINDOW_SECONDS;
-}
-
-// Same swap heuristic as the reference `extract_rate_limits`: the backend can temporarily omit
-// one window and promote the other into `primary_window`, or hand the two windows back in the
-// wrong slots. Restore "primary is always the session/short window, secondary is always weekly"
-// so every caller can rely on that meaning regardless of what the backend actually sent.
-function extractRateLimitWindows(rateLimit) {
-  if (!rateLimit || typeof rateLimit !== "object") return { primary: null, secondary: null };
-  const primary = parseRawWindow(rateLimit.primary_window);
-  const secondary = parseRawWindow(rateLimit.secondary_window);
-
-  if (primary && !secondary && isWeeklyWindow(primary)) return { primary: null, secondary: primary };
-  if (!primary && secondary && isSessionWindow(secondary)) return { primary: secondary, secondary: null };
-  if (primary && secondary && isWeeklyWindow(primary) && isSessionWindow(secondary)) {
-    return { primary: secondary, secondary: primary };
+// Reads one header value regardless of whether `headers` is a real Fetch `Headers` object (which
+// exposes `.get`) or a plain object (as used by the unit tests). Always case-insensitive, since
+// HTTP header names are. Returns null for anything that is not a usable string -- never throws.
+function readHeader(headers, name) {
+  if (!headers) return null;
+  if (typeof headers.get === "function") {
+    try {
+      const value = headers.get(name);
+      return typeof value === "string" ? value : null;
+    } catch {
+      return null;
+    }
   }
-  return { primary, secondary };
+  if (typeof headers === "object") {
+    const lowerName = name.toLowerCase();
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() !== lowerName) continue;
+      const value = headers[key];
+      return typeof value === "string" ? value : null;
+    }
+  }
+  return null;
 }
 
-function toPublicWindow(window) {
-  if (!window) return null;
+// Parses one header's text as a finite number. An absent header, an empty/whitespace-only string
+// (the API's way of signalling "no secondary window" on `x-codex-secondary-reset-at`), or any
+// non-numeric garbage all resolve to null rather than to 0 or NaN -- callers must be able to tell
+// "no value" apart from "the value is zero".
+function readNumericHeader(headers, name) {
+  const raw = readHeader(headers, name);
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : null;
+}
+
+// One rate-limit window (primary/session or secondary/weekly) from its three headers. The API
+// signals "this window does not apply right now" two ways -- an empty-string `*-reset-at`, or a
+// zero `*-window-minutes` -- either of which must produce a null window here, not a window that
+// falsely reports 0% used. A missing/garbage `*-used-percent` is just as unusable, so it also
+// yields null.
+function readUsageWindow(headers, prefix) {
+  const usedPercent = readNumericHeader(headers, `x-codex-${prefix}-used-percent`);
+  const windowMinutes = readNumericHeader(headers, `x-codex-${prefix}-window-minutes`);
+  const resetsAt = readNumericHeader(headers, `x-codex-${prefix}-reset-at`);
+  if (usedPercent === null || windowMinutes === null || windowMinutes <= 0 || resetsAt === null) {
+    return null;
+  }
+  return { usedPercent, windowMinutes, resetsAt };
+}
+
+// Pure normalizer: takes the response headers from the codex/responses warm-up call (a plain
+// object, a Headers-like object with `.get`, or anything else) and produces the small plain shape
+// the renderer displays. Never throws -- headers this function cannot make sense of just come
+// back as null windows / null plan type, exactly like a response with none of these headers set.
+function normalizeUsageHeaders(headers) {
+  const planTypeRaw = readHeader(headers, "x-codex-plan-type");
   return {
-    usedPercent: window.usedPercent,
-    windowMinutes: window.limitWindowSeconds !== null ? Math.ceil(window.limitWindowSeconds / 60) : null,
-    resetsAt: window.resetAt,
+    planType: nonEmptyString(planTypeRaw) ? planTypeRaw : null,
+    primary: readUsageWindow(headers, "primary"),
+    secondary: readUsageWindow(headers, "secondary"),
   };
 }
 
-// Pure normalizer: takes whatever JSON body the codex/responses warm-up call returned (which may
-// be missing `rate_limit` entirely, or malformed in any way) and produces the small plain shape
-// the renderer displays. Never throws -- a payload this function cannot make sense of just comes
-// back with null windows, exactly like a payload with no rate_limit at all.
-function normalizeRateLimitPayload(payload) {
-  const isObject = payload !== null && typeof payload === "object" && !Array.isArray(payload);
-  const rateLimit = isObject ? payload.rate_limit : null;
-  const { primary, secondary } = extractRateLimitWindows(rateLimit);
-  const planType = isObject && nonEmptyString(payload.plan_type) ? payload.plan_type : null;
-  return {
-    planType,
-    primary: toPublicWindow(primary),
-    secondary: toPublicWindow(secondary),
-  };
-}
-
+// Stable reason codes for an unavailable result. The renderer (src/i18n.ts) owns the localized
+// text for each of these; this module must never ship English prose up to the UI.
+//   - "no-account": this Codex Switcher account has no usable ChatGPT sign-in to ask on behalf of.
+//   - "token-invalid": the stored session was rejected (401/403); never refreshed, see header.
+//   - "request-failed": anything else that kept us from getting a usable answer (network error,
+//     timeout, non-2xx status, unreadable accounts file).
 function unavailable(accountId, reason) {
   return {
     accountId,
@@ -145,8 +160,7 @@ function unavailable(accountId, reason) {
   };
 }
 
-async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
-  const controller = new AbortController();
+async function fetchWithTimeout(fetchImpl, url, init, timeoutMs, controller) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetchImpl(url, { ...init, signal: controller.signal });
@@ -155,38 +169,61 @@ async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
   }
 }
 
+// Once we have the response object, its headers are already fully available -- everything this
+// module needs. We must not let the caller (or anything else) go on to read the body: with
+// `stream: true` the body is a live, still-generating model response, and downloading it would
+// needlessly spend the account's quota and the user's time on output nobody will see. Cancelling
+// the stream and aborting the controller both best-effort-release the connection; either failing
+// (e.g. because the body was already fully consumed, or the fetch implementation does not expose
+// a cancellable body) must never surface as an error from this function.
+function abortResponseBody(response, controller) {
+  try {
+    response?.body?.cancel?.();
+  } catch {
+    // Best-effort only.
+  }
+  try {
+    controller.abort();
+  } catch {
+    // Best-effort only.
+  }
+}
+
 // Fetches and normalizes rate-limit usage for one Codex Switcher Plus account. Always resolves --
-// including on a missing account, a network failure/timeout, a non-2xx response, or invalid JSON
-// -- with an `available: false` result carrying a short human-readable `reason`. This function
-// never throws and never retries with a refreshed token; see the module header for why.
+// including on a missing account, a network failure/timeout, a non-2xx response, or headers this
+// module cannot parse -- with an `available: false` result carrying a stable `reason` code (see
+// `unavailable` above). This function never throws, never downloads the streamed response body,
+// and never retries with a refreshed token; see the module header for why.
 async function fetchAccountUsage(accountId, {
   accountsPath,
+  codexHome,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   logger,
   fetchImpl = fetch,
 } = {}) {
   if (typeof accountId !== "string" || !accountId) {
-    return unavailable(accountId, "Account id is required");
+    return unavailable(accountId, "no-account");
   }
 
   let auth;
   try {
-    auth = readAccountChatGptAuth(accountId, accountsPath);
+    auth = resolveAccountChatGptAuth(accountId, { accountsPath, codexHome });
   } catch (error) {
     logger?.error?.("account_usage.read_failed", {
       message: error instanceof Error ? error.message : String(error),
     });
-    return unavailable(accountId, "Could not read the stored ChatGPT account");
+    return unavailable(accountId, "request-failed");
   }
-  if (!auth) return unavailable(accountId, "This account does not use ChatGPT sign-in");
+  if (!auth) return unavailable(accountId, "no-account");
 
+  const controller = new AbortController();
   let response;
   try {
     response = await fetchWithTimeout(fetchImpl, CODEX_RESPONSES_URL, {
       method: "POST",
       headers: buildChatGptHeaders(auth.accessToken, auth.chatgptAccountId),
       body: JSON.stringify(WARMUP_PAYLOAD),
-    }, timeoutMs);
+    }, timeoutMs, controller);
   } catch (error) {
     // Covers both network failures and the AbortController timeout above. Never logs the
     // request/response body or headers -- only that the attempt failed.
@@ -194,37 +231,31 @@ async function fetchAccountUsage(accountId, {
       accountId,
       message: error instanceof Error ? error.message : String(error),
     });
-    return unavailable(accountId, "The ChatGPT usage request failed or timed out");
+    return unavailable(accountId, "request-failed");
   }
+
+  // From here on we only ever look at `response.status`/`response.headers`, both already fully
+  // available on the resolved response -- so cancelling the body now costs us nothing we need.
+  abortResponseBody(response, controller);
 
   if (response.status === 401 || response.status === 403) {
     // Genuinely expired/rejected token. Reporting "unavailable" here -- and never attempting a
     // refresh -- is the whole point of this module; see the header comment.
     logger?.warn?.("account_usage.unauthorized", { accountId, status: response.status });
-    return unavailable(accountId, "The stored ChatGPT session for this account is no longer valid");
+    return unavailable(accountId, "token-invalid");
   }
   if (!response.ok) {
     logger?.warn?.("account_usage.error_status", { accountId, status: response.status });
-    return unavailable(accountId, `ChatGPT usage request returned status ${response.status}`);
+    return unavailable(accountId, "request-failed");
   }
 
-  let payload;
-  try {
-    payload = await response.json();
-  } catch (error) {
-    logger?.warn?.("account_usage.invalid_json", { accountId });
-    return unavailable(accountId, "The ChatGPT usage response could not be parsed");
-  }
-
-  const normalized = normalizeRateLimitPayload(payload);
+  const normalized = normalizeUsageHeaders(response.headers);
   return { accountId, available: true, reason: null, ...normalized };
 }
 
 module.exports = {
   CODEX_RESPONSES_URL,
-  SESSION_WINDOW_SECONDS,
-  WEEKLY_WINDOW_SECONDS,
   buildChatGptHeaders,
   fetchAccountUsage,
-  normalizeRateLimitPayload,
+  normalizeUsageHeaders,
 };

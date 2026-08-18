@@ -39,6 +39,13 @@ export interface BrowserState {
   url: string;
   title: string;
   authenticated: boolean;
+  // The email of the ChatGPT account the embedded browser's own session is signed in as, read
+  // from that session (independently of which Codex Switcher account is "active"). Each account
+  // has its own isolated browser partition, so this can legitimately differ from the active
+  // account -- e.g. an SSO password manager autofilled the wrong login during sign-in. Null
+  // whenever it cannot be determined right now (not authenticated, no session probe has run yet,
+  // or the session payload had no email claim) -- never a guess.
+  signedInEmail: string | null;
   visible: boolean;
   surfaceActive: boolean;
   loading: boolean;
@@ -66,10 +73,14 @@ export interface AccountUsageWindow {
   resetsAt: number | null;
 }
 
+// Stable reason codes emitted by electron/account-usage.cjs. The main process never sends
+// English prose up to the renderer; src/i18n.ts owns the localized text for each code.
+export type AccountUsageUnavailableReason = "no-account" | "token-invalid" | "request-failed";
+
 export interface AccountUsageInfo {
   accountId: string;
   available: boolean;
-  reason: string | null;
+  reason: AccountUsageUnavailableReason | null;
   planType: string | null;
   primary: AccountUsageWindow | null;
   secondary: AccountUsageWindow | null;

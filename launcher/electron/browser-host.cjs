@@ -201,6 +201,7 @@ class BrowserHost {
       url: "about:blank",
       title: "ChatGPT",
       authenticated: false,
+      signedInEmail: null,
       visible: false,
       surfaceActive: true,
       loading: false,
@@ -1164,6 +1165,7 @@ class BrowserHost {
       await contents.session.clearStorageData();
       this.setState({
         authenticated: false,
+        signedInEmail: null,
         loading: true,
         message: "Signing out of ChatGPT",
         status: "loading",
@@ -1194,15 +1196,26 @@ class BrowserHost {
     if (!this.view || this.view.webContents.isDestroyed()) return this.snapshot();
     let url = this.view.webContents.getURL();
     if (url === IDLE_BROWSER_URL) {
+      // Idle means no ChatGPT document is loaded right now, so there is nothing to read the
+      // signed-in identity from. Reporting the last-known value here would be a guess about the
+      // current session, not a fact about it -- go null instead, per the "show nothing rather
+      // than guess" rule.
       this.setState({
         status: this.state.authenticated ? "ready" : "signed-out",
         message: this.state.authenticated ? "No active task" : "Sign in to ChatGPT",
         url,
+        signedInEmail: null,
       });
       return this.snapshot();
     }
     if (!url.startsWith(CHATGPT_ORIGIN)) {
-      this.setState({ status: "signed-out", message: "Sign in to ChatGPT", authenticated: false, url });
+      this.setState({
+        status: "signed-out",
+        message: "Sign in to ChatGPT",
+        authenticated: false,
+        signedInEmail: null,
+        url,
+      });
       return this.snapshot();
     }
     const probe = (contents) => contents.executeJavaScript(`(async () => {
@@ -1221,6 +1234,7 @@ class BrowserHost {
       };
       const initialSurface = readSurface();
       let sessionAuthenticated = false;
+      let email = null;
       if (new URL(initialSurface.url).origin === expectedUrl.origin) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), ${CHATGPT_AUTH_SESSION_TIMEOUT_MS});
@@ -1251,16 +1265,18 @@ class BrowserHost {
           sessionAuthenticated = sessionHasUser
             && sessionHasNoError
             && sessionExpiryIsValid;
+          if (sessionAuthenticated && typeof user.email === "string" && user.email) email = user.email;
         } catch {}
         finally { clearTimeout(timeout); }
       }
-      return { ...readSurface(), sessionAuthenticated };
+      return { ...readSurface(), sessionAuthenticated, email };
     })()`, true).catch(() => ({
       url: "",
       composer: false,
       temporary: false,
       sessionAuthenticated: false,
       readyState: "unknown",
+      email: null,
     }));
     let result = await probe(this.view.webContents);
     if (!(result.composer && result.temporary && result.sessionAuthenticated)
@@ -1285,7 +1301,16 @@ class BrowserHost {
         : this.manualOperation
           ? {}
           : { status: "ready", message: "ChatGPT is ready" };
-      this.setState({ ...availability, authenticated: true, url: result.url });
+      this.setState({
+        ...availability,
+        authenticated: true,
+        // Only overwrite the last-known identity when this probe actually found one -- a
+        // transient probe hiccup that still proved "authenticated" (e.g. the email claim was
+        // momentarily missing from the session payload) should not blank out a value we already
+        // know, since that would flip a correctly-shown identity to "unknown" for no reason.
+        ...(typeof result.email === "string" && result.email ? { signedInEmail: result.email } : {}),
+        url: result.url,
+      });
       if (!wasAuthenticated) this.logger.info("browser.authenticated", { url: result.url });
     } else {
       const loaded = result.readyState === "complete";
@@ -1293,6 +1318,7 @@ class BrowserHost {
         status: loaded ? "signed-out" : "loading",
         message: loaded ? "Sign in to ChatGPT" : "Waiting for ChatGPT",
         authenticated: false,
+        signedInEmail: null,
         url: result.url || url,
       });
     }
