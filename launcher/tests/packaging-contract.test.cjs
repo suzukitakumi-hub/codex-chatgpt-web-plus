@@ -116,7 +116,10 @@ test("Windows packages embed the checksummed Bun baseline runtime for CPUs witho
     "utf8",
   );
   assert.match(builder, /CODEX_CHATGPT_WEB_EMBEDDED_BUN/);
-  assert.match(builder, /Embedded Bun must be/);
+  // The version gate is now an announced escape hatch, not a hard failure: stable Bun 1.3.14
+  // segfaults in its stream sink under this proxy, so a canary can be embedded on purpose. It
+  // still only happens via CODEX_CHATGPT_WEB_EMBEDDED_BUN, and it must stay loud in the build log.
+  assert.match(builder, /embedding Bun \$\{reported\}, not the pinned/);
   assert.match(baseline, /bun-windows-x64-baseline\.zip/);
   assert.match(baseline, /SHASUMS256\.txt/);
   assert.match(baseline, /Get-FileHash[^\n]+SHA256/);

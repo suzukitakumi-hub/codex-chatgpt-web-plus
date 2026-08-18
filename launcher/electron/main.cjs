@@ -186,7 +186,13 @@ async function restoreCodexRouteAfterRuntimeFailure({ logger, stateStore }) {
     const route = await runtimeHost.restoreBridgeRoute("runtime-start-fail-safe");
     if (!route.installed || route.active) return { restored: false };
     const state = stateStore.update({
-      bridgeEnabled: false,
+      // Deliberately does NOT write bridgeEnabled. Tearing the route down here is the right
+      // fail-safe -- a runtime that would not start must not leave Codex pointed at a dead local
+      // endpoint -- but the reason is a runtime failure, not a decision by the user. A transient
+      // one (a startup race on the ChatGPT session inspection, for instance) used to flip the
+      // stored intent off permanently, so the bridge stayed disabled on every later launch until
+      // it was toggled by hand. Leaving the intent alone lets reconcileBridgeOnStartup bring the
+      // route back on the next launch, which is what the user actually asked for.
       codexCatalogVerified: false,
       codexRestartRequired: true,
     });

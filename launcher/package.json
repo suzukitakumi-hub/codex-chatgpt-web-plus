@@ -1,6 +1,6 @@
 {
   "name": "codex-chatgpt-web-plus-launcher",
-  "version": "2.4.2",
+  "version": "2.4.3",
   "private": true,
   "description": "Desktop control center for Codex ChatGPT Web (hardened fork)",
   "author": "miuuyy",

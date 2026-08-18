@@ -85,7 +85,11 @@ if (install.exitCode !== 0) {
   throw new Error(`Runtime dependencies failed to install: ${install.stderr.toString() || install.stdout.toString()}`);
 }
 const bunName = process.platform === "win32" ? "bun.exe" : "bun";
-cpSync(embeddedBunExecutable(), join(runtimeDir, bunName));
+const embeddedBun = embeddedBunExecutable();
+// Report the Bun that actually ships, not the one that ran this build -- they differ whenever
+// CODEX_CHATGPT_WEB_EMBEDDED_BUN is used, and the manifest is what the launcher validates against.
+const embeddedBunVersion = Bun.spawnSync([embeddedBun, "--version"], { stdout: "pipe" }).stdout.toString().trim() || Bun.version;
+cpSync(embeddedBun, join(runtimeDir, bunName));
 if (process.platform !== "win32") chmodSync(join(runtimeDir, bunName), 0o755);
 
 const launcherName = process.platform === "win32" ? "codex-chatgpt-web.cmd" : "codex-chatgpt-web";
@@ -130,7 +134,7 @@ writeFileSync(join(output, "manifest.json"), `${JSON.stringify({
   schemaVersion: 1,
   appVersion: VERSION,
   bundleId: bundleId.digest("hex"),
-  bunVersion: Bun.version,
+  bunVersion: embeddedBunVersion,
   platform: process.platform,
   arch: process.arch,
   launcher: `bin/${launcherName}`,
