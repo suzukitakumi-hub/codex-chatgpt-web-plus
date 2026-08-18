@@ -166,6 +166,52 @@ test("deactivates the route when intent is OFF but the route is observed active,
   assert.deepEqual(operations, []);
 });
 
+// Regression for the version-upgrade path: `upgradeManagedRuntime()` mechanically disconnects the
+// route while it swaps runtime binaries and reports that transient teardown back as
+// `upgrade.bridgeEnabled`. That must never be written into `stateStore.update(...)` as the user's
+// intent -- main.cjs's startup block now omits the key entirely (see runtime.release_upgraded in
+// main.cjs). This test drives the real reconcileBridgeOnStartup the way startup does immediately
+// after an upgrade: intent is untouched (still ON from before the upgrade), the route was left
+// disconnected by the upgrade's mechanical teardown, and reconciliation must bring the route back
+// to the user's real, never-clobbered intent.
+test("regression: a completed runtime upgrade must not clobber bridge intent, and startup reconciles the route back to it", async () => {
+  const stateStore = fakeStateStore({ bridgeEnabled: true });
+  const { host, calls } = fakeRuntimeHost({ installed: true, active: true });
+  const { logger, errors } = fakeLogger();
+  const operations = [];
+
+  // Simulate upgradeManagedRuntime's mechanical side effect: the route ends up disconnected
+  // around the upgrade, and it reports that observation as `upgrade.bridgeEnabled: false`.
+  host.active = false;
+  const upgrade = { updated: true, bridgeEnabled: false };
+
+  // This mirrors the FIXED main.cjs startup patch: `upgrade.bridgeEnabled` must never be written
+  // into stateStore.update(...). Confirm that applying only the non-intent fields leaves the
+  // user's persisted intent completely untouched.
+  stateStore.update({ coreSetupComplete: true, codexCatalogVerified: false, codexRestartRequired: true });
+  assert.equal(
+    stateStore.read().bridgeEnabled,
+    true,
+    "the upgrade's transient route teardown must not overwrite the user's ON intent",
+  );
+  assert.equal(upgrade.bridgeEnabled, false, "upgrade.bridgeEnabled remains available as diagnostics only");
+
+  // reconcileBridgeOnStartup runs immediately after the upgrade step in main.cjs.
+  const result = await reconcileBridgeOnStartup({
+    runtimeHost: host,
+    stateStore,
+    logger,
+    publishOperation: (op) => operations.push(op),
+  });
+
+  assert.equal(host.active, true, "the route must be restored to match the user's real (ON) intent after the upgrade");
+  assert.equal(stateStore.read().bridgeEnabled, true, "intent must remain ON, unchanged by the upgrade or the reconciliation");
+  assert.equal(result.status, "bridge-enabled");
+  assert.deepEqual(calls.setBridgeEnabled, [true]);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(operations, []);
+});
+
 test("does not crash startup and does not flip intent to on when deactivation fails, and surfaces it", async () => {
   const { host, calls } = fakeRuntimeHost({
     installed: true,

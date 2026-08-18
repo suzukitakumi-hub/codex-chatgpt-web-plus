@@ -952,8 +952,15 @@ async function start() {
   void (async () => {
     const upgrade = await runtimeHost.upgradeManagedRuntime();
     if (upgrade.updated) {
+      // Do NOT write `bridgeEnabled` here. `upgrade.bridgeEnabled` reports the route's observed
+      // state around the upgrade (upgradeManagedRuntime mechanically disconnects the route while
+      // it swaps runtime binaries), not the user's intent. `bridgeEnabled` in launcher state is
+      // the user's INTENT and must only change through a genuine user action (Settings toggle,
+      // first-time setup, explicit uninstall) -- see bridge-reconcile.cjs. reconcileBridgeOnStartup
+      // runs immediately below and brings the route back in line with the persisted intent, so no
+      // restore logic is needed here; overwriting the intent with this transient upgrade side
+      // effect would silently disable the bridge on every version upgrade.
       const state = stateStore.update({
-        bridgeEnabled: upgrade.bridgeEnabled,
         coreSetupComplete: true,
         codexCatalogVerified: false,
         codexRestartRequired: true,

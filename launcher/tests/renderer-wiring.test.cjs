@@ -140,6 +140,39 @@ test("completed model setup remains a repeatable capability probe", () => {
   );
 });
 
+test("a completed runtime upgrade never writes bridgeEnabled, so it cannot clobber the user's intent", () => {
+  // `upgradeManagedRuntime()` mechanically disconnects the Codex bridge route while it swaps
+  // runtime binaries, then reports that transient observation back as `upgrade.bridgeEnabled`.
+  // That is diagnostic information about what the upgrade *did* to the route, not a statement of
+  // what the user *wants*. `bridgeEnabled` in launcher state is the user's persisted INTENT and
+  // must only change through a genuine user action (Settings toggle, first-time setup, explicit
+  // uninstall) -- see bridge-reconcile.cjs. If this startup block ever writes
+  // `bridgeEnabled: upgrade.bridgeEnabled` into stateStore.update(...), it silently overwrites the
+  // user's real intent with the upgrade's mechanical side effect, and because this runs BEFORE
+  // reconcileBridgeOnStartup, the reconciler then faithfully "honors" the clobbered value and
+  // leaves the bridge off after every version upgrade. Assert the key is absent from that patch.
+  const upgradeStart = electronMain.indexOf("const upgrade = await runtimeHost.upgradeManagedRuntime();");
+  assert.ok(upgradeStart >= 0, "the runtime-upgrade startup step must remain in main.cjs");
+  const updateStart = electronMain.indexOf("const state = stateStore.update({", upgradeStart);
+  const updateEnd = electronMain.indexOf("});", updateStart);
+  assert.ok(updateStart > upgradeStart && updateEnd > updateStart, "the upgrade's stateStore.update(...) call must remain in main.cjs");
+  const patch = electronMain.slice(updateStart, updateEnd);
+  assert.doesNotMatch(patch, /bridgeEnabled/, "the upgrade path must not overwrite the user's persisted bridge intent");
+  assert.match(patch, /coreSetupComplete:\s*true/, "the rest of the upgrade patch must remain intact");
+
+  // The diagnostic log line downstream may still report the observed value -- that is useful and
+  // must stay -- it just must never be persisted as intent.
+  const logStart = electronMain.indexOf('logger.info("runtime.release_upgraded"', updateEnd);
+  assert.ok(logStart > updateEnd, "the runtime.release_upgraded diagnostic log must remain");
+  const logEnd = electronMain.indexOf("});", logStart);
+  assert.match(electronMain.slice(logStart, logEnd), /bridgeEnabled:\s*upgrade\.bridgeEnabled/);
+
+  // reconcileBridgeOnStartup must run immediately after, so any transient teardown from the
+  // upgrade gets reconciled back to the user's real (untouched) intent.
+  const reconcileCall = electronMain.indexOf("reconcileBridgeOnStartup(", updateEnd);
+  assert.ok(reconcileCall > updateEnd, "startup must reconcile the route to intent right after the upgrade step");
+});
+
 test("session reminders expose dismissal and a real storage-clearing logout", () => {
   assert.match(electronMain, /sessionRefreshReminderAt:\s*nextSessionRefreshReminderAt\(\)/);
   assert.match(electronMain, /launcher:session-reminder-dismiss/);
