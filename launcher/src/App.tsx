@@ -1539,16 +1539,20 @@ function AccountSwitcherRow({
   const [accounts, setAccounts] = useState<SwitcherAccountSummary[] | null>(null);
   const [activeAccountId, setActiveAccountId] = useState<string | null>(null);
   const [switching, setSwitching] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<string | null>(null);
+
+  const loadAccounts = useCallback(async () => {
+    const result = await api!.listAccounts();
+    setAccounts(result.accounts);
+    setActiveAccountId(result.activeAccountId);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    void api!.listAccounts().then((result) => {
-      if (cancelled) return;
-      setAccounts(result.accounts);
-      setActiveAccountId(result.activeAccountId);
-    }).catch((cause) => setError(messageOf(cause)));
+    void loadAccounts().catch((cause) => { if (!cancelled) setError(messageOf(cause)); });
     return () => { cancelled = true; };
-  }, [setError]);
+  }, [loadAccounts, setError]);
 
   const switchAccount = async (accountId: string) => {
     if (switching || accountId === activeAccountId) return;
@@ -1560,9 +1564,28 @@ function AccountSwitcherRow({
       await api!.switchAccount(accountId);
       setActiveAccountId(accountId);
     } catch (cause) {
-      setError(messageOf(cause));
+      // The main process reports a dead refresh token as a stable "NEEDS_REAUTH:<id>" message
+      // (see credential-provider.cjs's NeedsReauthError) rather than localized prose -- only the
+      // renderer owns localized text. Every other failure still falls back to its raw message.
+      setError(isNeedsReauthError(cause) ? copy.switchAccountNeedsReauth : messageOf(cause));
     } finally {
       setSwitching(false);
+    }
+  };
+
+  const runImport = async () => {
+    setImporting(true);
+    setImportResult(null);
+    try {
+      const result = await api!.importCodexAuth();
+      setImportResult(importResultText(result.status, copy));
+      if (result.status === "added" || result.status === "updated") {
+        await loadAccounts().catch((cause) => setError(messageOf(cause)));
+      }
+    } catch {
+      setImportResult(copy.importCodexAuthError);
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -1570,6 +1593,11 @@ function AccountSwitcherRow({
 
   return (
     <>
+      <SettingRow body={importResult ?? copy.importCodexAuthBody} label={copy.importCodexAuthAction}>
+        <button className="text-button" disabled={importing} onClick={() => void runImport()} type="button">
+          {importing ? copy.importCodexAuthRunning : copy.importCodexAuthAction}
+        </button>
+      </SettingRow>
       <SettingRow body={copy.switchAccountBody} label={copy.activeAccount}>
         {accounts === null ? (
           <span className="account-menu-loading">{copy.loading}</span>
@@ -1589,6 +1617,30 @@ function AccountSwitcherRow({
       <ChatGptIdentityNotice activeAccountEmail={activeAccountEmail} browser={browser} copy={copy} />
     </>
   );
+}
+
+// Stable, secret-free prefix electron/credential-provider.cjs's NeedsReauthError uses for its
+// `.message` -- the only property of a thrown Error that survives the Electron IPC boundary --
+// so this recognizes it instead of showing raw English through messageOf.
+const NEEDS_REAUTH_PREFIX = "NEEDS_REAUTH:";
+
+function isNeedsReauthError(cause: unknown): boolean {
+  return cause instanceof Error && cause.message.startsWith(NEEDS_REAUTH_PREFIX);
+}
+
+// The main process only ever sends a stable status code (see CodexAuthImportStatus in
+// src/types.ts) -- never English prose -- so every localized string for it lives here.
+function importResultText(status: string, copy: Copy): string {
+  switch (status) {
+    case "added": return copy.importCodexAuthAdded;
+    case "updated": return copy.importCodexAuthUpdated;
+    case "unchanged":
+    case "no-auth-file":
+    case "unrecognized":
+      return copy.importCodexAuthUnchanged;
+    default:
+      return copy.importCodexAuthError;
+  }
 }
 
 function formatUsageResetTime(resetsAt: number | null): string | null {
@@ -1615,6 +1667,7 @@ function formatUsageWindow(label: string, resetLabel: string, window: AccountUsa
 function usageReasonText(reason: AccountUsageInfo["reason"], copy: Copy): string {
   switch (reason) {
     case "token-invalid": return copy.usageReasonTokenInvalid;
+    case "needs-reauth": return copy.usageReasonNeedsReauth;
     case "no-account": return copy.usageReasonNoAccount;
     case "request-failed": return copy.usageReasonRequestFailed;
     default: return copy.usageUnavailable;

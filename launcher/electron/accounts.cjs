@@ -25,8 +25,14 @@ function codexHomeDir() {
   return configured ? expandHomePath(configured) : path.join(os.homedir(), ".codex");
 }
 
-// Codex Switcher Plus owns this file; we only ever read it, and always fresh from disk (never
-// cached) so callers can't act on a stale snapshot.
+// This project now owns and maintains this file: credential-provider.cjs refreshes and persists
+// ChatGPT tokens back into it (see that module's header for the single-writer, serialize-per
+// -account discipline that requires), and credential-import.cjs adopts fresh credentials from
+// ~/.codex/auth.json into it. The app that used to own it, Codex Switcher Plus, has been
+// uninstalled, and nothing else maintains this file's contents.
+//
+// This particular function remains a pure, always-fresh read (never cached) so callers here can't
+// act on a stale snapshot -- it is not one of the writers.
 function readRawSwitcherAccounts(filePath = switcherAccountsPath()) {
   let text;
   try {
@@ -140,6 +146,14 @@ function backupExistingAuthFile(authPath) {
 // instead of trusting an earlier snapshot (e.g. one returned from readSwitcherAccounts a moment
 // ago) — writing an already-consumed refresh_token produces 401 refresh_token_reused failures the
 // next time Codex tries to refresh.
+//
+// This function itself never refreshes anything -- it faithfully writes whatever is currently
+// stored for `accountId`. Callers that care whether that stored token is still usable (in
+// particular the account-switch flow) must call credential-provider.cjs's ensureFreshChatGptAuth
+// first, which refreshes AND durably persists a near-expiry token into accounts.json before this
+// function ever reads it -- otherwise a stale stored token (nothing has maintained this file since
+// Codex Switcher Plus was uninstalled) gets written straight into auth.json and silently breaks
+// that account's login.
 function writeCodexAuth(accountId, { accountsPath, codexHome, now } = {}) {
   if (typeof accountId !== "string" || !accountId) {
     throw new Error("Account id is required to switch Codex authentication");
@@ -185,19 +199,28 @@ function base64UrlDecode(segment) {
   return Buffer.from(normalized + "=".repeat(padLength), "base64").toString("utf8");
 }
 
-// Defensive JWT payload decode: any malformed/garbage token (wrong segment count, invalid
-// base64url, invalid JSON, non-string email claim) resolves to "no email claim" rather than
-// throwing, since a broken token is not grounds to crash account resolution.
-function decodeIdTokenEmail(idToken) {
-  if (typeof idToken !== "string" || !idToken) return null;
-  const parts = idToken.split(".");
+// Defensive JWT payload decode, shared by every claim reader in this codebase (email here,
+// `exp`/`account_id` in credential-provider.cjs and credential-import.cjs). Any malformed/garbage
+// token (wrong segment count, invalid base64url, invalid JSON payload) resolves to null rather
+// than throwing -- a broken token is never grounds to crash account resolution, refresh, or
+// import. Never validates the signature: every caller already trusts the source (our own stored
+// accounts.json, or a freshly issued response from the token endpoint), so this is a claims
+// reader, not an auth check.
+function decodeJwtPayload(token) {
+  if (typeof token !== "string" || !token) return null;
+  const parts = token.split(".");
   if (parts.length < 2) return null;
   try {
     const payload = JSON.parse(base64UrlDecode(parts[1]));
-    return typeof payload?.email === "string" && payload.email ? payload.email : null;
+    return payload && typeof payload === "object" ? payload : null;
   } catch {
     return null;
   }
+}
+
+function decodeIdTokenEmail(idToken) {
+  const payload = decodeJwtPayload(idToken);
+  return typeof payload?.email === "string" && payload.email ? payload.email : null;
 }
 
 // Derives which Codex Switcher Plus account (if any) the CURRENT ~/.codex/auth.json corresponds
@@ -268,19 +291,22 @@ function readAccountChatGptAuth(accountId, filePath) {
   };
 }
 
-// Resolves the ChatGPT bearer credential to use for one Codex Switcher Plus account's usage
-// lookup. ~/.codex-switcher/accounts.json is a snapshot written by an app that is no longer
-// installed, so any token stored there only gets staler over time and eventually stops working.
-// ~/.codex/auth.json, by contrast, is kept continuously refreshed by Codex itself for whichever
-// account it is currently authenticated as. So: when auth.json currently belongs to this same
-// account -- per resolveActiveAccountId, which already does this exact identity match, reused
-// here rather than re-implemented -- prefer its access_token; otherwise fall back to the stored
-// token in accounts.json, exactly as before. auth.json may also hold an API-key credential
-// instead of ChatGPT OAuth tokens; that has no bearer token usable for this endpoint, so it falls
-// back to the stored token (or null) the same as any other non-match, rather than returning
-// something malformed. Never refreshes a token, never writes to accounts.json or auth.json, and
-// returns only the same {accessToken, chatgptAccountId} shape as readAccountChatGptAuth -- never
-// id_token or refresh_token.
+// Resolves the ChatGPT bearer credential to use for one Codex Switcher Plus account, preferring
+// ~/.codex/auth.json's access_token when it currently belongs to this same account -- per
+// resolveActiveAccountId, which already does this exact identity match, reused here rather than
+// re-implemented -- since Codex keeps that file continuously fresh in real time for whichever
+// account it is actively authenticated as. Otherwise falls back to whatever is currently stored in
+// accounts.json, exactly as-is. auth.json may also hold an API-key credential instead of ChatGPT
+// OAuth tokens; that has no bearer token usable here, so it falls back to the stored token (or
+// null) the same as any other non-match, rather than returning something malformed.
+//
+// This function never refreshes a token and never writes to accounts.json or auth.json -- it is a
+// pure, read-only resolver, kept around because "give me whatever is currently valid, without
+// side effects" is still a legitimate, separate need from "make sure this is not about to expire"
+// (that need is credential-provider.cjs's ensureFreshChatGptAuth, which account-usage.cjs now
+// composes with the same auth.json preference below instead of calling this function). Returns
+// only the same {accessToken, chatgptAccountId} shape as readAccountChatGptAuth -- never id_token
+// or refresh_token.
 function resolveAccountChatGptAuth(accountId, { accountsPath, codexHome } = {}) {
   if (typeof accountId !== "string" || !accountId) return null;
   if (resolveActiveAccountId({ accountsPath, codexHome }) === accountId) {
@@ -350,11 +376,19 @@ function isCodexRunning({ platform = process.platform, spawn = spawnSync } = {})
 
 module.exports = {
   LEGACY_CHATGPT_PARTITION,
+  authDotJsonPath,
   buildAuthDotJson,
   codexHomeDir,
+  decodeIdTokenEmail,
+  decodeJwtPayload,
+  isApiKeyAuthData,
+  isChatGptAuthData,
   isCodexRunning,
+  nonEmptyString,
   partitionForAccount,
   readAccountChatGptAuth,
+  readAuthDotJson,
+  readRawSwitcherAccounts,
   readSwitcherAccounts,
   resolveAccountChatGptAuth,
   resolveActiveAccountId,

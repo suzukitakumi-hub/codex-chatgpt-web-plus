@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   listAccounts: () => ipcRenderer.invoke("launcher:list-accounts"),
   switchAccount: (accountId) => ipcRenderer.invoke("launcher:switch-account", accountId),
   fetchAccountUsage: (accountId) => ipcRenderer.invoke("launcher:account-usage", accountId),
+  importCodexAuth: () => ipcRenderer.invoke("launcher:import-codex-auth"),
   logs: (limit) => ipcRenderer.invoke("launcher:logs", limit),
   openLogs: () => ipcRenderer.invoke("launcher:open-logs"),
   installUpdate: () => ipcRenderer.invoke("launcher:update-install"),

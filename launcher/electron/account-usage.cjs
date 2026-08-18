@@ -10,18 +10,21 @@
 //     `rate_limit` JSON object at all -- every rate-limit field now arrives as a response HEADER
 //     (see `normalizeUsageHeaders` below for the exact set).
 //
-// CRITICAL: this module must never refresh tokens. ~/.codex-switcher/accounts.json is owned by
-// Codex Switcher Plus, an app that is no longer installed on this machine; we only ever read it
-// (via accounts.cjs), and any token stored there just ages out over time since nothing refreshes
-// it. ChatGPT refresh tokens are single-use and rotate on every refresh: if this module refreshed
-// one, the rotated value would not be written back to accounts.json, so that account's stored
-// refresh_token would go stale -- and the NEXT account switch would write the now-dead token into
-// ~/.codex/auth.json, breaking that account's login with refresh_token_reused 401s. So: use
-// whichever access_token accounts.cjs's resolveAccountChatGptAuth hands back as-is (it prefers the
-// continuously-refreshed ~/.codex/auth.json when that file currently belongs to this account, and
-// otherwise falls back to the stored, possibly-stale token), and on 401/403 report usage as
-// unavailable. Never retry with a refreshed token.
-const { resolveAccountChatGptAuth } = require("./accounts.cjs");
+// Credential resolution: prefer ~/.codex/auth.json's access_token when it currently belongs to
+// this exact account (Codex keeps that file continuously fresh in real time for whichever account
+// it is actively authenticated as, which beats even our own last refresh for recency); otherwise
+// fall back to the stored accounts.json token via credential-provider.cjs's ensureFreshChatGptAuth,
+// which refreshes AND durably persists it first if it is expired or near expiry. This project now
+// owns and maintains accounts.json (the app that used to, Codex Switcher Plus, has been
+// uninstalled), so unlike before, a stale stored token here is no longer inevitable -- see
+// credential-provider.cjs's header for the persist-before-return and per-account serialization
+// guarantees that make refreshing here safe. A dead refresh token surfaces as a `needs-reauth`
+// result rather than throwing. Separately, a 401/403 actually returned by the usage request itself
+// is still reported as `token-invalid` without ever retrying -- a token can be rejected live by the
+// API for reasons unrelated to its own expiry claim, and retrying here would risk a second
+// concurrent refresh attempt outside this module's control.
+const { authDotJsonPath, readAuthDotJson, resolveActiveAccountId } = require("./accounts.cjs");
+const { NeedsReauthError, ensureFreshChatGptAuth } = require("./credential-provider.cjs");
 
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 const CODEX_RESPONSES_URL = `${CHATGPT_ORIGIN}/backend-api/codex/responses`;
@@ -146,7 +149,11 @@ function normalizeUsageHeaders(headers) {
 // Stable reason codes for an unavailable result. The renderer (src/i18n.ts) owns the localized
 // text for each of these; this module must never ship English prose up to the UI.
 //   - "no-account": this Codex Switcher account has no usable ChatGPT sign-in to ask on behalf of.
-//   - "token-invalid": the stored session was rejected (401/403); never refreshed, see header.
+//   - "needs-reauth": the stored token was expired/near expiry and refreshing it failed (most
+//     likely because the refresh token is also dead) -- this account must be signed in again
+//     through Codex. accounts.json is left untouched when this happens.
+//   - "token-invalid": the token that was actually sent was rejected live (401/403) by the usage
+//     request itself; never retried, see header.
 //   - "request-failed": anything else that kept us from getting a usable answer (network error,
 //     timeout, non-2xx status, unreadable accounts file).
 function unavailable(accountId, reason) {
@@ -189,17 +196,44 @@ function abortResponseBody(response, controller) {
   }
 }
 
+// Resolves the ChatGPT bearer credential to use for one account's usage lookup. Prefers
+// ~/.codex/auth.json's access_token when it currently belongs to this exact account (per
+// resolveActiveAccountId -- the same identity match writeCodexAuth and credential-import.cjs rely
+// on, reused here rather than re-implemented); otherwise falls back to
+// credential-provider.cjs's ensureFreshChatGptAuth, which refreshes and durably persists the
+// stored accounts.json token first if needed. `tokenFetchImpl` is deliberately a separate
+// parameter from the `fetchImpl` used for the usage request itself below -- they hit two entirely
+// different endpoints (OpenAI's OAuth token endpoint vs. ChatGPT's warm-up endpoint), and tests
+// exercise them independently.
+async function resolveUsageAuth(accountId, { accountsPath, codexHome, tokenFetchImpl, logger } = {}) {
+  if (resolveActiveAccountId({ accountsPath, codexHome }) === accountId) {
+    const auth = readAuthDotJson(authDotJsonPath(codexHome));
+    const tokens = auth?.tokens;
+    if (tokens && typeof tokens === "object" && nonEmptyString(tokens.access_token)) {
+      return {
+        accessToken: tokens.access_token,
+        chatgptAccountId: nonEmptyString(tokens.account_id) ? tokens.account_id : null,
+      };
+    }
+  }
+  return ensureFreshChatGptAuth(accountId, { accountsPath, fetchImpl: tokenFetchImpl, logger });
+}
+
 // Fetches and normalizes rate-limit usage for one Codex Switcher Plus account. Always resolves --
-// including on a missing account, a network failure/timeout, a non-2xx response, or headers this
-// module cannot parse -- with an `available: false` result carrying a stable `reason` code (see
-// `unavailable` above). This function never throws, never downloads the streamed response body,
-// and never retries with a refreshed token; see the module header for why.
+// including on a missing account, a network failure/timeout, a non-2xx response, headers this
+// module cannot parse, or a dead refresh token -- with an `available: false` result carrying a
+// stable `reason` code (see `unavailable` above). This function never throws and never downloads
+// the streamed response body. It may refresh (and durably persist) the account's stored token via
+// resolveUsageAuth above, but never retries the usage request itself with a second token once a
+// response has come back -- a 401/403 on the request that was actually sent is reported as
+// `token-invalid`, full stop.
 async function fetchAccountUsage(accountId, {
   accountsPath,
   codexHome,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   logger,
   fetchImpl = fetch,
+  tokenFetchImpl = fetch,
 } = {}) {
   if (typeof accountId !== "string" || !accountId) {
     return unavailable(accountId, "no-account");
@@ -207,8 +241,12 @@ async function fetchAccountUsage(accountId, {
 
   let auth;
   try {
-    auth = resolveAccountChatGptAuth(accountId, { accountsPath, codexHome });
+    auth = await resolveUsageAuth(accountId, { accountsPath, codexHome, tokenFetchImpl, logger });
   } catch (error) {
+    if (error instanceof NeedsReauthError) {
+      logger?.warn?.("account_usage.needs_reauth", { accountId });
+      return unavailable(accountId, "needs-reauth");
+    }
     logger?.error?.("account_usage.read_failed", {
       message: error instanceof Error ? error.message : String(error),
     });
@@ -239,8 +277,10 @@ async function fetchAccountUsage(accountId, {
   abortResponseBody(response, controller);
 
   if (response.status === 401 || response.status === 403) {
-    // Genuinely expired/rejected token. Reporting "unavailable" here -- and never attempting a
-    // refresh -- is the whole point of this module; see the header comment.
+    // The token that was actually sent was rejected live by the API. This is reported as
+    // "unavailable" without ever retrying with a fresh token from here -- see the header comment
+    // for why a retry belongs to resolveUsageAuth's proactive, expiry-based refresh, not to a
+    // reaction to this status code.
     logger?.warn?.("account_usage.unauthorized", { accountId, status: response.status });
     return unavailable(accountId, "token-invalid");
   }

@@ -24,6 +24,8 @@ const {
   writeCodexAuth,
 } = require("./accounts.cjs");
 const { fetchAccountUsage } = require("./account-usage.cjs");
+const { ensureFreshChatGptAuth } = require("./credential-provider.cjs");
+const { importFromAuthDotJson } = require("./credential-import.cjs");
 const { reconcileBridgeOnStartup } = require("./bridge-reconcile.cjs");
 const { BrowserHost } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
@@ -634,6 +636,15 @@ function registerIpc({ logger, stateStore }) {
     if (!accounts.some((account) => account.id === accountId)) {
       throw new Error(`No Codex Switcher account matches id ${accountId}`);
     }
+    // Ensure the stored ChatGPT token is fresh -- refreshing and durably persisting it into
+    // accounts.json FIRST -- before writeCodexAuth reads accounts.json and writes whatever it
+    // finds into ~/.codex/auth.json. This is the fix for the actual bug: switching to an account
+    // whose token has quietly expired (nothing has maintained accounts.json since Codex Switcher
+    // Plus was uninstalled) used to write that dead token straight into auth.json. If the account
+    // cannot be refreshed (e.g. its refresh token is also dead), this throws a NeedsReauthError
+    // whose message is the stable "NEEDS_REAUTH:<id>" marker the renderer recognizes -- and
+    // accounts.json is left completely untouched.
+    await ensureFreshChatGptAuth(accountId, { logger });
     writeCodexAuth(accountId);
     const state = stateStore.update({ activeAccountId: accountId });
     send("launcher:state-changed", state);
@@ -661,9 +672,18 @@ function registerIpc({ logger, stateStore }) {
     if (typeof accountId !== "string" || !accountId) throw new Error("Account id is required");
     // Fetched lazily, only when the caller (the Settings account UI) asks -- never on a startup
     // timer or a poll. Always resolves to a plain usage-or-unavailable object: fetchAccountUsage
-    // itself never throws, and it never refreshes the account's ChatGPT tokens (see its header
-    // comment for why that would corrupt the next account switch).
+    // itself never throws. It may refresh (and durably persist) the account's stored ChatGPT
+    // token via credential-provider.cjs when it is expired or near expiry -- see that module's
+    // header for why that is now safe to do here.
     return await fetchAccountUsage(accountId, { logger });
+  });
+  handle("launcher:import-codex-auth", () => {
+    // Explicit, user-triggered counterpart to the same import that also runs once automatically at
+    // startup (see start(), below) -- lets the account UI offer "check for a new Codex sign-in"
+    // on demand instead of only after a relaunch. Never throws; see credential-import.cjs.
+    const result = importFromAuthDotJson();
+    logger.info("accounts.auth_import", { status: result.status, accountId: result.accountId ?? null });
+    return result;
   });
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
   handle("launcher:open-logs", async () => {
@@ -826,6 +846,25 @@ async function start() {
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
+  // Adopt whatever credentials Codex itself currently has in ~/.codex/auth.json into
+  // accounts.json on every launch -- e.g. because the user signed in directly through Codex
+  // (`codex login`) rather than through this launcher -- so that sign-in becomes a switchable
+  // account here too, without waiting for the user to discover the manual "check now" action in
+  // Settings. Synchronous (a few small local file reads/writes) and never throws by contract
+  // (see credential-import.cjs), so this cannot meaningfully delay or fail startup.
+  try {
+    const importResult = importFromAuthDotJson();
+    logger.info("accounts.auth_import_startup", {
+      status: importResult.status,
+      accountId: importResult.accountId ?? null,
+    });
+  } catch (error) {
+    // importFromAuthDotJson is documented to never throw; this guard exists only so a future
+    // change to that contract can never turn into a startup crash.
+    logger.warn("accounts.auth_import_startup_failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
   if (userDataResolution.outcome === "migration-failed") {
     logger.warn("launcher.user_data_dir_resolved", {
       dir: launcherUserData,

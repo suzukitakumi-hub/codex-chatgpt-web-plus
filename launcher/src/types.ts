@@ -75,7 +75,16 @@ export interface AccountUsageWindow {
 
 // Stable reason codes emitted by electron/account-usage.cjs. The main process never sends
 // English prose up to the renderer; src/i18n.ts owns the localized text for each code.
-export type AccountUsageUnavailableReason = "no-account" | "token-invalid" | "request-failed";
+export type AccountUsageUnavailableReason = "no-account" | "needs-reauth" | "token-invalid" | "request-failed";
+
+// Stable status codes emitted by electron/credential-import.cjs's importFromAuthDotJson.
+export type CodexAuthImportStatus = "no-auth-file" | "unrecognized" | "unchanged" | "updated" | "added" | "error";
+
+export interface CodexAuthImportResult {
+  status: CodexAuthImportStatus;
+  accountId?: string;
+  message?: string;
+}
 
 export interface AccountUsageInfo {
   accountId: string;
@@ -180,6 +189,7 @@ export interface LauncherApi {
   }>;
   switchAccount(accountId: string): Promise<LauncherState>;
   fetchAccountUsage(accountId: string): Promise<AccountUsageInfo>;
+  importCodexAuth(): Promise<CodexAuthImportResult>;
   logs(limit?: number): Promise<LogRecord[]>;
   openLogs(): Promise<string>;
   installUpdate(): Promise<boolean>;

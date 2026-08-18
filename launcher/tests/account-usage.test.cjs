@@ -373,6 +373,100 @@ function writeAuthDotJson(codexHome, payload) {
   fs.writeFileSync(path.join(codexHome, "auth.json"), JSON.stringify(payload));
 }
 
+function base64UrlEncode(text) {
+  return Buffer.from(text, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function makeToken(payload) {
+  return `${base64UrlEncode(JSON.stringify({ alg: "none" }))}.${base64UrlEncode(JSON.stringify(payload))}.signature`;
+}
+
+function okJsonResponse(payload) {
+  return { ok: true, status: 200, json: async () => payload, text: async () => "" };
+}
+
+test("fetchAccountUsage refreshes and persists an expired stored token (when auth.json does not belong to this account) before using it", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-usage-refresh-"));
+  try {
+    const codexHome = path.join(root, "codex-home");
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const expiredAccessToken = makeToken({ exp: nowSeconds - 1000, account_id: "acct_work" });
+    const accountsPath = writeAccountsFile(root, [chatGptAccount({
+      auth_data: {
+        type: "chat_g_p_t",
+        id_token: "id-token-value",
+        access_token: expiredAccessToken,
+        refresh_token: "stored-refresh-token",
+        account_id: "acct_work",
+      },
+    })]);
+    // auth.json is absent, so there is nothing to prefer over the stored (expired) token.
+    let tokenRefreshCalls = 0;
+    let seenHeaders = null;
+    const result = await fetchAccountUsage("work-account", {
+      accountsPath,
+      codexHome,
+      tokenFetchImpl: async () => {
+        tokenRefreshCalls += 1;
+        return okJsonResponse({ access_token: "freshly-refreshed-access-token", refresh_token: "freshly-refreshed-refresh-token" });
+      },
+      fetchImpl: async (_url, init) => {
+        seenHeaders = init.headers;
+        return fakeResponse({ ok: true, status: 200, headers: headerMap() });
+      },
+    });
+
+    assert.equal(tokenRefreshCalls, 1);
+    assert.equal(seenHeaders.authorization, "Bearer freshly-refreshed-access-token");
+    assert.equal(result.available, true);
+
+    const persisted = JSON.parse(fs.readFileSync(accountsPath, "utf8"));
+    assert.equal(persisted.accounts[0].auth_data.access_token, "freshly-refreshed-access-token");
+    assert.equal(persisted.accounts[0].auth_data.refresh_token, "freshly-refreshed-refresh-token");
+
+    const serialized = JSON.stringify(result);
+    assert.equal(serialized.includes("freshly-refreshed-refresh-token"), false);
+    assert.equal(serialized.includes("stored-refresh-token"), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fetchAccountUsage reports needs-reauth, without a usage request, when the stored refresh token is dead", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-usage-needs-reauth-"));
+  try {
+    const codexHome = path.join(root, "codex-home");
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const expiredAccessToken = makeToken({ exp: nowSeconds - 1000 });
+    const accountsPath = writeAccountsFile(root, [chatGptAccount({
+      auth_data: {
+        type: "chat_g_p_t",
+        id_token: "id-token-value",
+        access_token: expiredAccessToken,
+        refresh_token: "dead-refresh-token",
+        account_id: "acct_work",
+      },
+    })]);
+    const before = fs.readFileSync(accountsPath, "utf8");
+    let usageRequestCalled = false;
+
+    const result = await fetchAccountUsage("work-account", {
+      accountsPath,
+      codexHome,
+      tokenFetchImpl: async () => ({ ok: false, status: 400, json: async () => ({}), text: async () => "invalid_grant" }),
+      fetchImpl: async () => { usageRequestCalled = true; throw new Error("must not be called"); },
+    });
+
+    assert.equal(result.available, false);
+    assert.equal(result.reason, "needs-reauth");
+    assert.equal(usageRequestCalled, false);
+    // accounts.json must be left completely untouched when the refresh itself fails.
+    assert.equal(fs.readFileSync(accountsPath, "utf8"), before);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("fetchAccountUsage sends the fresher ~/.codex/auth.json access_token when it currently belongs to the requested account", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-usage-fresh-auth-"));
   try {
