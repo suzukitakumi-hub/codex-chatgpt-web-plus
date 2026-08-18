@@ -17,3 +17,6 @@ references/
 launcher/build/
 launcher/release/
 launcher/artifacts/
+
+# Vendored Bun for the runtime bundle (large binary, fetched manually)
+vendor/bun/

@@ -27,7 +27,13 @@ function embeddedBunExecutable(): string {
   }
   const reported = version.stdout.toString().trim();
   if (reported !== expectedBunVersion) {
-    throw new Error(`Embedded Bun must be ${expectedBunVersion}, received ${reported || "no version"}`);
+      // Deliberate escape hatch. Stable Bun 1.3.14 segfaults in its stream sink while the proxy
+      // streams responses back to Codex (Sink.write -> streams.zig -> appendSliceAssumeCapacity,
+      // memcpy faulting at 0xFFFFFFFFFFFFFFFF): 51-75 daemon crashes per hour on Windows, which
+      // Codex surfaces as a reconnect between nearly every tool call. 1.4.0-canary does not crash.
+      // Embedding a different build stays an explicit choice, since it happens only when the
+      // operator points CODEX_CHATGPT_WEB_EMBEDDED_BUN at that binary, and it is announced here.
+      console.warn(`[build-runtime-bundle] embedding Bun ${reported}, not the pinned ${expectedBunVersion}`);
   }
   return executable;
 }
