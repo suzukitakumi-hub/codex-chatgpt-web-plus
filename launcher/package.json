@@ -37,7 +37,7 @@
   },
   "build": {
     "appId": "com.suzukitakumi.codex-chatgpt-web-plus",
-    "productName": "Codex Web GPT",
+    "productName": "Codex ChatGPT Web Plus",
     "artifactName": "codex-web-gpt-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "directories": {

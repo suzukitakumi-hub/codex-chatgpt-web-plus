@@ -65,12 +65,12 @@ const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNEL
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
 
-app.setName("Codex Web GPT");
+app.setName("Codex ChatGPT Web Plus");
 if (process.platform === "win32") app.setAppUserModelId("com.suzukitakumi.codex-chatgpt-web-plus");
 const configuredUserData = process.env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR?.trim();
 const launcherUserData = configuredUserData
   ? resolveUserPath(configuredUserData)
-  : path.join(app.getPath("appData"), "Codex Web GPT");
+  : path.join(app.getPath("appData"), "Codex ChatGPT Web Plus");
 fs.mkdirSync(launcherUserData, { recursive: true, mode: 0o700 });
 if (process.platform !== "win32") fs.chmodSync(launcherUserData, 0o700);
 app.setPath("userData", launcherUserData);
@@ -197,9 +197,9 @@ function trayImage() {
 function createTray(logger) {
   try {
     tray = new Tray(trayImage());
-    tray.setToolTip("Codex Web GPT");
+    tray.setToolTip("Codex ChatGPT Web Plus");
     tray.setContextMenu(Menu.buildFromTemplate([
-      { label: "Open Codex Web GPT", click: () => showMainWindow() },
+      { label: "Open Codex ChatGPT Web Plus", click: () => showMainWindow() },
       { type: "separator" },
       { label: "Quit", click: () => { void requestQuit(); } },
     ]));
@@ -265,7 +265,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
       : {}),
     minWidth: MIN_WINDOW_BOUNDS.width,
     minHeight: MIN_WINDOW_BOUNDS.height,
-    title: "Codex Web GPT",
+    title: "Codex ChatGPT Web Plus",
     icon: APP_ICON_PATH,
     show: false,
     backgroundColor: isMac ? "#00000000" : "#181818",
@@ -345,7 +345,7 @@ async function loadRenderer(window) {
 }
 
 function validateLanguage(value) {
-  if (value !== "en" && value !== "zh-CN") throw new Error("Language must be en or zh-CN");
+  if (value !== "en" && value !== "zh-CN" && value !== "ja") throw new Error("Language must be en, zh-CN, or ja");
   return value;
 }
 
@@ -484,18 +484,23 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:uninstall-integration", async () => {
     const language = stateStore.read().language;
     const chinese = language === "zh-CN";
+    const japanese = language === "ja";
     const confirmation = await dialog.showMessageBox(mainWindow, {
       type: "warning",
-      buttons: chinese ? ["取消", "移除"] : ["Cancel", "Remove"],
+      buttons: chinese ? ["取消", "移除"] : japanese ? ["キャンセル", "削除"] : ["Cancel", "Remove"],
       defaultId: 0,
       cancelId: 0,
-      title: chinese ? "移除 Codex Web GPT" : "Remove Codex Web GPT",
+      title: chinese ? "移除 Codex ChatGPT Web Plus" : japanese ? "Codex ChatGPT Web Plus を削除" : "Remove Codex ChatGPT Web Plus",
       message: chinese
         ? "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？"
-        : "Remove the ChatGPT Web models from Codex and restore the previous model route?",
+        : japanese
+          ? "ChatGPT Web モデルを Codex から削除し、以前のモデルルートを復元しますか？"
+          : "Remove the ChatGPT Web models from Codex and restore the previous model route?",
       detail: chinese
         ? "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。"
-        : "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
+        : japanese
+          ? "ランチャーの ChatGPT ログインプロファイルは保持されます。Codex を一度再起動してください。"
+          : "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
       noLink: true,
     });
     if (confirmation.response !== 1) return { cancelled: true };
@@ -621,7 +626,7 @@ async function requestQuit() {
   try {
     const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
     if (activeOperation) {
-      throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
+      throw new Error(`Wait for ${activeOperation} to finish before quitting Codex ChatGPT Web Plus`);
     }
     // This launcher is the only thing keeping Codex's model route pointed at a live server.
     // Once this process exits, nothing is left to serve that route, so restore Codex's previous
@@ -942,7 +947,7 @@ async function start() {
     if (runtime.status === "external" || runtime.status === "needs-setup") {
       const detail = runtime.detail || (
         runtime.status === "external"
-          ? "Another process owns the configured Codex Web GPT runtime"
+          ? "Another process owns the configured Codex ChatGPT Web Plus runtime"
           : "The installed runtime configuration must be repaired from Setup"
       );
       publishOperation({
@@ -985,7 +990,7 @@ void start().catch((error) => {
     fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
   } catch {}
   try {
-    dialog.showErrorBox("Codex Web GPT could not start", message);
+    dialog.showErrorBox("Codex ChatGPT Web Plus could not start", message);
   } catch {}
   app.exit(1);
 });
