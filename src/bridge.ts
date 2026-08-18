@@ -734,6 +734,14 @@ export function bridgeToResponsesSSE(
             closed = true;
             return;
           }
+          // Only write a keepalive when the sink can accept it. The pump goes through
+          // waitForCapacity, but this timer used to enqueue unconditionally, so a client that had
+          // stopped draining (Codex busy running a local tool) left the sink full while a frame was
+          // pushed in every heartbeatMs. Writing into a full sink is what crashes the Bun stream
+          // sink on Windows: capacity accounting underflows and memcpy faults at 0xFFFFFFFFFFFFFFFF.
+          // A backed-up stream already proves liveness, so skipping the frame is strictly safer.
+          // Stall detection is unaffected: stallTicks is incremented above this point.
+          if ((controller.desiredSize ?? 1) <= 0) return;
           try {
             controller.enqueue(heartbeatFrame);
             emittedFrames++;
