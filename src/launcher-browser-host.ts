@@ -102,6 +102,20 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
   };
 }
 
+/**
+ * Used by `uninstall` to tell a genuinely crashed launcher (no live process to drain) apart from
+ * a merely disconnected one, so a dead launcher can no longer block CLI recovery indefinitely.
+ */
+export function isLauncherBrowserHostAlive(configuredPath: string | undefined): boolean {
+  if (!configuredPath) return false;
+  try {
+    readLauncherBrowserHostDescriptor(configuredPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function readLauncherBrowserHostDescriptor(configuredPath: string): LauncherBrowserHostDescriptor {
   const path = resolve(expandUserPath(configuredPath));
   if (!existsSync(path)) throw new Error(`Launcher browser host is unavailable: descriptor is missing at ${path}`);

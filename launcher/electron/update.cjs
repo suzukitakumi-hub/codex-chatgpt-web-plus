@@ -6,7 +6,9 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { pipeline } = require("node:stream/promises");
 
-const REPOSITORY = "miuuyy/codex-chatgpt-web";
+// Must point at this fork's own releases, not upstream's — otherwise the auto-updater would pull
+// miuuyy's build (without this fork's fixes) and silently undo them on the next update check.
+const REPOSITORY = "suzukitakumi-hub/codex-chatgpt-web-plus";
 const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
 const USER_AGENT = "codex-web-gpt-launcher-updater";
 const MAX_REDIRECTS = 5;

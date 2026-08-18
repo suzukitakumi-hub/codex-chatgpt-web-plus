@@ -50,10 +50,7 @@ test("setup validates the port before performing runtime work", async () => {
   }
 });
 
-test("terminal uninstall refuses to race a launcher-owned runtime", async () => {
-  const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-cli-uninstall-"));
-  const appHome = join(root, "app");
-  const configPath = join(appHome, "config.json");
+function writeLauncherOwnedConfig(appHome: string, configPath: string): void {
   mkdirSync(appHome, { recursive: true });
   writeFileSync(configPath, `${JSON.stringify({
     version: 3,
@@ -74,6 +71,33 @@ test("terminal uninstall refuses to race a launcher-owned runtime", async () => 
     controlToken: "launcher-uninstall-control-token-0123456789abcdef",
     runtimeCommand: [process.execPath],
   })}\n`);
+}
+
+test("terminal uninstall refuses to race a live launcher-owned runtime", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-cli-uninstall-live-"));
+  const appHome = join(root, "app");
+  const configPath = join(appHome, "config.json");
+  writeLauncherOwnedConfig(appHome, configPath);
+  const descriptorPath = join(appHome, "runtime", "launcher-browser.json");
+  mkdirSync(join(appHome, "runtime"), { recursive: true });
+  writeFileSync(descriptorPath, `${JSON.stringify({
+    version: 1,
+    kind: "codex-web-gpt-launcher",
+    pid: process.pid,
+    endpoint: "http://127.0.0.1:19222",
+    control: {
+      endpoint: "http://127.0.0.1:19223",
+      token: "a".repeat(40),
+    },
+    helper: {
+      executable: process.execPath,
+      script: resolve(import.meta.dir, "../src/cli.ts"),
+    },
+    partition: "persist:codex-web-gpt-chatgpt",
+    idleUrl: "about:blank#codex-web-gpt-browser-host",
+    surfaceId: "b".repeat(32),
+    createdAt: new Date().toISOString(),
+  })}\n`);
   try {
     const result = await runCli([
       "uninstall",
@@ -86,6 +110,30 @@ test("terminal uninstall refuses to race a launcher-owned runtime", async () => 
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("must be removed from Codex Web GPT Settings");
     expect(existsSync(configPath)).toBe(true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("terminal uninstall proceeds once a launcher-owned runtime has actually crashed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-cli-uninstall-dead-"));
+  const appHome = join(root, "app");
+  const configPath = join(appHome, "config.json");
+  // No descriptor file is written at browserHostDescriptorPath, matching a launcher that
+  // crashed without leaving its host descriptor behind (or leaving a stale one for a dead pid).
+  writeLauncherOwnedConfig(appHome, configPath);
+  try {
+    const result = await runCli([
+      "uninstall",
+      "--yes",
+    ], {
+      ...process.env,
+      CODEX_HOME: join(root, "codex"),
+      CODEX_CHATGPT_WEB_HOME: appHome,
+    });
+    expect(result.stderr).not.toContain("must be removed from Codex Web GPT Settings");
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(appHome)).toBe(false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

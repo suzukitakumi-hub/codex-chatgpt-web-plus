@@ -56,7 +56,7 @@ const BROWSER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "launcher-browse
 const BROWSER_HELPER_PATH = app.isPackaged
   ? path.join(process.resourcesPath, "runtime", "app", "browser-helper.cjs")
   : path.join(SOURCE_ROOT, ".launcher-runtime", "browser-helper.cjs");
-const GITHUB_URL = "https://github.com/miuuyy/codex-chatgpt-web";
+const GITHUB_URL = "https://github.com/suzukitakumi-hub/codex-chatgpt-web-plus";
 const X_URL = "https://x.com/miu21590";
 const CONNECTORS_URL = "https://chatgpt.com/#settings/Plugins";
 const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
@@ -66,7 +66,7 @@ const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
 
 app.setName("Codex Web GPT");
-if (process.platform === "win32") app.setAppUserModelId("dev.codexwebgpt.launcher");
+if (process.platform === "win32") app.setAppUserModelId("com.suzukitakumi.codex-chatgpt-web-plus");
 const configuredUserData = process.env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR?.trim();
 const launcherUserData = configuredUserData
   ? resolveUserPath(configuredUserData)
@@ -81,6 +81,7 @@ installProcessDiagnosticGuards({
 let mainWindow = null;
 let browserHost = null;
 let runtimeHost = null;
+let logger = null;
 let browserControl = null;
 let runtimeSupervisor = null;
 let tray = null;
@@ -622,6 +623,18 @@ async function requestQuit() {
     if (activeOperation) {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
+    // This launcher is the only thing keeping Codex's model route pointed at a live server.
+    // Once this process exits, nothing is left to serve that route, so restore Codex's previous
+    // route now instead of leaving config.toml pointed at an endpoint this quit is about to kill.
+    if (runtimeHost) {
+      try {
+        await runtimeHost.restoreBridgeRoute("app-quit-fail-safe");
+      } catch (error) {
+        logger?.error("bridge.route_restore_before_quit_failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     await runtimeSupervisor?.shutdown();
     stopCatalogVerificationMonitor();
     quitting = true;
@@ -641,6 +654,42 @@ async function requestQuit() {
     shutdownInProgress = false;
   }
 }
+
+let crashRecoveryInFlight = false;
+
+// An uncaught exception normally takes this process down with no cleanup, leaving Codex's
+// config.toml pointed at the local server this crash is about to silence. Best-effort route
+// restore first, bounded so a hung restore cannot turn a crash into a frozen process.
+async function crashRecoverAndExit(context, error) {
+  const message = error instanceof Error ? (error.stack || error.message) : String(error);
+  try {
+    fs.appendFileSync(
+      path.join(app.getPath("logs"), "launcher-fatal.log"),
+      `${new Date().toISOString()} [${context}] ${message}\n`,
+    );
+  } catch {}
+  if (!crashRecoveryInFlight && runtimeHost) {
+    crashRecoveryInFlight = true;
+    try {
+      await Promise.race([
+        runtimeHost.restoreBridgeRoute("app-crash-fail-safe"),
+        new Promise((_resolve, reject) => setTimeout(() => reject(new Error("route restore timed out")), 10_000)),
+      ]);
+    } catch (restoreError) {
+      try {
+        fs.appendFileSync(
+          path.join(app.getPath("logs"), "launcher-fatal.log"),
+          `${new Date().toISOString()} [${context}] route restore failed: `
+          + `${restoreError instanceof Error ? restoreError.message : String(restoreError)}\n`,
+        );
+      } catch {}
+    }
+  }
+  process.exit(1);
+}
+
+process.on("uncaughtException", (error) => { void crashRecoverAndExit("uncaughtException", error); });
+process.on("unhandledRejection", (reason) => { void crashRecoverAndExit("unhandledRejection", reason); });
 
 async function start() {
   cdpPort = await findFreePort();
@@ -687,7 +736,7 @@ async function start() {
   if (stateStore.read().onboardingComplete && autostart.supported && stateStore.read().autoStart !== autostart.enabled) {
     setAutostart(app, stateStore.read().autoStart);
   }
-  const logger = createLogger({
+  logger = createLogger({
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });

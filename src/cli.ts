@@ -6,7 +6,11 @@ import { existsSync, rmSync } from "node:fs";
 import { stdin, stdout } from "node:process";
 import { checkBrowserEngine, loginToChatGpt } from "./browser-login";
 import { CHATGPT_CONNECTOR_NAME, getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
-import { inspectLauncherBrowserHost, readLauncherBrowserHostDescriptor } from "./launcher-browser-host";
+import {
+  inspectLauncherBrowserHost,
+  isLauncherBrowserHostAlive,
+  readLauncherBrowserHostDescriptor,
+} from "./launcher-browser-host";
 import {
   activateCodexIntegration,
   deactivateCodexIntegration,
@@ -311,7 +315,9 @@ async function uninstallCommand(args: string[]): Promise<void> {
     throw new Error("Uninstall cancelled");
   }
   const config = existsSync(getConfigPath()) ? loadConfig() : undefined;
-  if (config?.browserHost === "launcher" && !launcherControl) {
+  const launcherHostAlive = config?.browserHost === "launcher"
+    && isLauncherBrowserHostAlive(config.browserHostDescriptorPath);
+  if (config?.browserHost === "launcher" && !launcherControl && launcherHostAlive) {
     throw new Error(
       "Launcher-owned integration must be removed from Codex Web GPT Settings so the active runtime can be drained safely.",
     );
@@ -319,7 +325,9 @@ async function uninstallCommand(args: string[]): Promise<void> {
   if (!config && process.platform === "darwin" && getServiceStatus().installed) {
     throw new Error("Service exists but configuration is missing; refusing an unverifiable uninstall");
   }
-  const launcherRuntimeStopped = config?.browserHost === "launcher" && launcherControl;
+  // A launcher that isn't actually running has nothing left to drain, so a dead process no
+  // longer needs `--launcher-control` to unblock recovery — only a live one does.
+  const launcherRuntimeStopped = config?.browserHost === "launcher" && (launcherControl || !launcherHostAlive);
   if (config && process.platform === "darwin" && !launcherRuntimeStopped) await assertServiceIdle(config);
   if (config?.mode === "full" && !launcherRuntimeStopped) {
     if (process.platform === "darwin") await uninstallTunnelService();

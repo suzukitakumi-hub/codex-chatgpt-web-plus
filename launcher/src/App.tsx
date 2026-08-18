@@ -91,7 +91,7 @@ export function App() {
   if (!api) return <FatalMessage message="Launcher IPC is unavailable." />;
   if (!snapshot) return <LaunchLoading />;
 
-  const language = snapshot.state.language ?? "en";
+  const language = snapshot.state.language ?? "ja";
   const copy = copyFor(language);
 
   return (
@@ -211,6 +211,13 @@ function Onboarding({
 
           {isLanguage ? (
             <div className="welcome-options" role="radiogroup" aria-label={localized.chooseLanguage}>
+              <WelcomeOption
+                active={selectedLanguage === "ja"}
+                detail="日本語"
+                label="日本語"
+                marker="日"
+                onClick={() => setSelectedLanguage("ja")}
+              />
               <WelcomeOption
                 active={selectedLanguage === "en"}
                 detail="English"
@@ -1657,6 +1664,7 @@ function Switch({
 function LanguageMenu({ language, onChange }: { language: Language; onChange: (language: Language) => void }) {
   const [open, setOpen] = useState(false);
   const options: Array<{ label: string; value: Language }> = [
+    { label: "日本語", value: "ja" },
     { label: "English", value: "en" },
     { label: "简体中文", value: "zh-CN" },
   ];

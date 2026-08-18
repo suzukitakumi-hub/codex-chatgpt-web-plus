@@ -31,6 +31,35 @@ test("normal shutdown persists the ChatGPT session before closing browser views"
   assert.ok(destroy > persist, "browser views must close only after session persistence completes");
 });
 
+test("quitting the launcher restores the Codex route before the runtime that serves it stops", () => {
+  const requestQuitStart = electronMain.indexOf("async function requestQuit()");
+  const restoreCall = electronMain.indexOf("runtimeHost.restoreBridgeRoute(\"app-quit-fail-safe\")", requestQuitStart);
+  const supervisorShutdown = electronMain.indexOf("await runtimeSupervisor?.shutdown()", requestQuitStart);
+  assert.ok(requestQuitStart >= 0, "requestQuit must exist");
+  assert.ok(restoreCall > requestQuitStart, "requestQuit must restore the Codex route");
+  assert.ok(
+    supervisorShutdown > restoreCall,
+    "the route must be restored before the runtime serving it is shut down",
+  );
+});
+
+test("an uncaught exception or rejection restores the Codex route before the process exits", () => {
+  assert.match(
+    electronMain,
+    /process\.on\("uncaughtException", \(error\) => \{ void crashRecoverAndExit\("uncaughtException", error\); \}\);/,
+  );
+  assert.match(
+    electronMain,
+    /process\.on\("unhandledRejection", \(reason\) => \{ void crashRecoverAndExit\("unhandledRejection", reason\); \}\);/,
+  );
+  const crashRecoverStart = electronMain.indexOf("async function crashRecoverAndExit(");
+  const restoreCall = electronMain.indexOf("runtimeHost.restoreBridgeRoute(\"app-crash-fail-safe\")", crashRecoverStart);
+  const exitCall = electronMain.indexOf("process.exit(1)", crashRecoverStart);
+  assert.ok(crashRecoverStart >= 0, "crashRecoverAndExit must exist");
+  assert.ok(restoreCall > crashRecoverStart, "crashRecoverAndExit must restore the Codex route");
+  assert.ok(exitCall > restoreCall, "the process must exit only after the restore attempt settles");
+});
+
 test("the renderer bridge switch reaches the fail-closed runtime route", () => {
   assert.match(appSource, /api!\.setBridgeEnabled\(enabled\)/);
   assert.match(electronMain, /runtimeHost\.setBridgeEnabled\(enabled === true\)/);
